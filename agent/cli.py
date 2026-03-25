@@ -161,3 +161,7 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
 def main_entry() -> None:
     """Console script entry point (used by pip install)."""
     sys.exit(run_cli())
+
+
+if __name__ == "__main__":
+    main_entry()
