@@ -13,15 +13,14 @@ logger = get_logger(__name__)
 _HOOK_TEMPLATE = """\
 #!/bin/sh
 # Code Review Agent — pre-commit hook
-# Auto-installed by: code_review_agent install
+# Auto-installed by: cra install
 
 set -e
 
 PYTHON="{python_bin}"
-AGENT="{agent_entry}"
 
 # Review only staged files before the commit is created
-"$PYTHON" "$AGENT" review --staged
+"$PYTHON" -m agent.cli review --staged
 exit $?
 """
 
@@ -46,7 +45,6 @@ def install_hook(repo_root: Optional[str] = None, force: bool = False) -> bool:
 
     hook_path = hooks_dir / "pre-commit"
     python_bin = sys.executable
-    agent_entry = str(Path(__file__).resolve().parent.parent.parent / "main.py")
 
     if hook_path.exists() and not force:
         content = hook_path.read_text()
@@ -61,7 +59,6 @@ def install_hook(repo_root: Optional[str] = None, force: bool = False) -> bool:
 
     hook_content = _HOOK_TEMPLATE.format(
         python_bin=python_bin,
-        agent_entry=agent_entry,
     )
     hook_path.write_text(hook_content, encoding="utf-8")
 
