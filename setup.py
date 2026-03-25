@@ -8,9 +8,9 @@ _README = (Path(__file__).parent / "README.md").read_text(encoding="utf-8") if (
 ).exists() else ""
 
 setup(
-    name="code-review-agent",
+    name="code_review_agent",
     version="1.0.0",
-    description="Intelligent Python-based git pre-push code review agent",
+    description="Intelligent Python-based git pre-commit code review agent",
     long_description=_README,
     long_description_content_type="text/markdown",
     author="B4G Projects",
