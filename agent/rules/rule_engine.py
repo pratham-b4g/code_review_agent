@@ -191,8 +191,10 @@ class RuleEngine:
         if not pattern_str:
             return None
 
+        # Normalise to forward slashes so patterns work on Windows too
+        normalised_path = file_path.replace("\\", "/")
         try:
-            matched = bool(re.search(pattern_str, file_path))
+            matched = bool(re.search(pattern_str, normalised_path))
         except re.error:
             return None
 
