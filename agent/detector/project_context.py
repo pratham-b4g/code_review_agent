@@ -44,6 +44,51 @@ class ProjectContext:
         return self.language == "python"
 
 
+def _detect_subproject_root(project_root: str, files_to_review: List[str]) -> str:
+    """If all staged files share a common subdirectory that has its own package.json
+    or requirements.txt, use that subdirectory as the detection root.
+
+    This handles monorepos like:
+        CT/
+        ├── client/   (React)
+        └── server/   (Express)
+
+    If staged files are all under server/, detection runs against server/ not CT/.
+    """
+    if not files_to_review:
+        return project_root
+
+    root = Path(project_root).resolve()
+    skip = {"node_modules", ".git", "venv", "dist", "build", "__pycache__"}
+
+    # Find the top-level subdirectory each staged file lives in
+    subdirs = set()
+    for f in files_to_review:
+        parts = Path(f).parts
+        # parts could be absolute or relative — find the subdir under root
+        try:
+            rel = Path(f).resolve().relative_to(root)
+            if rel.parts:
+                subdirs.add(rel.parts[0])
+        except ValueError:
+            pass
+
+    # If all staged files are under the same subdir, check if it has a project manifest
+    if len(subdirs) == 1:
+        subdir = root / list(subdirs)[0]
+        if subdir.is_dir() and subdir.name not in skip:
+            has_manifest = (
+                (subdir / "package.json").exists()
+                or (subdir / "requirements.txt").exists()
+                or (subdir / "pyproject.toml").exists()
+            )
+            if has_manifest:
+                logger.debug("Monorepo subproject detected: %s", subdir)
+                return str(subdir)
+
+    return project_root
+
+
 def build_project_context(
     project_root: str,
     files_to_review: List[str],
@@ -63,12 +108,17 @@ def build_project_context(
     """
     root = str(Path(project_root).resolve())
 
+    # For monorepos, detect against the subproject the staged files belong to
+    detection_root = _detect_subproject_root(root, files_to_review)
+    if detection_root != root:
+        print(f"[INFO] Subproject detected : {Path(detection_root).name}/")
+
     language: str
     if language_override:
         language = language_override.lower()
         logger.debug("Language override: %s", language)
     else:
-        detector = LanguageDetector(project_root=root)
+        detector = LanguageDetector(project_root=detection_root)
         language = detector.detect_primary_language()
         logger.debug("Detected language: %s", language)
 
@@ -77,7 +127,7 @@ def build_project_context(
         framework = framework_override.lower()
         logger.debug("Framework override: %s", framework)
     else:
-        fw_detector = FrameworkDetector(project_root=root)
+        fw_detector = FrameworkDetector(project_root=detection_root)
         framework = fw_detector.detect()
         logger.debug("Detected framework: %s", framework)
 
