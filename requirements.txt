@@ -1,5 +1,11 @@
 # Runtime dependencies
 pyyaml>=6.0
+groq>=0.9.0
+
+# Optional AI providers (install the one you use)
+# anthropic>=0.25.0
+# openai>=1.0.0
+# google-genai>=1.0.0
 
 # Development / testing
 pytest>=7.4

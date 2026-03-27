@@ -63,6 +63,8 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
         from agent.hook_runner import run_review
 
         staged = False
+        ai_review = False
+        skip_lint = False
         language: Optional[str] = None
         framework: Optional[str] = None
         config_path: Optional[str] = None
@@ -74,6 +76,10 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
             token = args[i]
             if token == "--staged":
                 staged = True
+            elif token == "--ai":
+                ai_review = True
+            elif token == "--skip-lint":
+                skip_lint = True
             elif token == "--lang" and i + 1 < len(args):
                 i += 1
                 language = args[i]
@@ -98,6 +104,8 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
             config_path=config_path,
             staged_only=staged,
             manual_review=True,
+            ai_review=ai_review,
+            skip_lint=skip_lint,
         )
 
     # ── hook ────────────────────────────────────────────────────────────

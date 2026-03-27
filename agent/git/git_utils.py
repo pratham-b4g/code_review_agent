@@ -34,13 +34,19 @@ def get_repo_root() -> Optional[str]:
     return out if code == 0 else None
 
 
-def get_staged_files() -> List[str]:
-    """Return a list of staged (index) files relative to the repo root."""
-    code, out, err = _run_git("diff", "--cached", "--name-only", "--diff-filter=ACMRT")
+def get_staged_files(cwd: Optional[str] = None) -> List[str]:
+    """Return a list of staged (index) files as absolute paths."""
+    code, out, err = _run_git("diff", "--cached", "--name-only", "--diff-filter=ACMRT", cwd=cwd)
     if code != 0:
         logger.warning("Failed to list staged files: %s", err)
         return []
-    return [f for f in out.splitlines() if f]
+    files = [f for f in out.splitlines() if f]
+    if cwd and files:
+        # Resolve relative paths to absolute using the repo root
+        root_code, root_out, _ = _run_git("rev-parse", "--show-toplevel", cwd=cwd)
+        repo_root = root_out if root_code == 0 else cwd
+        files = [str(Path(repo_root) / f) for f in files]
+    return files
 
 
 def get_pushed_files(local_sha: str, remote_sha: str) -> List[str]:

@@ -28,6 +28,8 @@ def run_review(
     config_path: Optional[str] = None,
     staged_only: bool = False,
     manual_review: bool = False,
+    ai_review: bool = False,
+    skip_lint: bool = False,
 ) -> int:
     """Execute a full code review and return an exit code.
 
@@ -55,7 +57,8 @@ def run_review(
     if files is not None:
         review_files = files
     elif staged_only:
-        review_files = get_staged_files()
+        review_files = get_staged_files(cwd=root)
+        print(f"[INFO] Staged files: {len(review_files)} file(s)")
     elif manual_review:
         # Auto-detect language from project root, then scan for matching files
         lang = language_override or LanguageDetector(root).detect_primary_language()
@@ -87,12 +90,16 @@ def run_review(
         framework_override=framework_override,
     )
 
+    print(f"[INFO] Language  : {ctx.language}")
+    print(f"[INFO] Framework : {ctx.framework or 'none detected'}")
+
     reporter = Reporter(use_color=config.get("use_color", True))
     reporter.print_header(language=ctx.language, framework=ctx.framework or "")
 
     # ── Load rules ──────────────────────────────────────────────────────
     loader = RuleLoader(rules_dir=config.rules_dir)
     rules = loader.load_rules(language=ctx.language, framework=ctx.framework)
+    print(f"[INFO] Rules loaded: {len(rules)} rule(s)")
 
     # Optionally merge rules from a remote API
     remote_url = config.remote_rules_url
@@ -111,7 +118,7 @@ def run_review(
         return 0
 
     # ── Run linting first ────────────────────────────────────────────────
-    if config.get("run_linting", True):
+    if not skip_lint and config.get("run_linting", True):
         lint_code = run_linting(
             files=review_files,
             language=ctx.language,
@@ -131,6 +138,10 @@ def run_review(
     engine = RuleEngine(python_analyzer=py_analyzer, js_analyzer=js_analyzer)
 
     # ── Run review ──────────────────────────────────────────────────────
+    print(f"[INFO] Evaluating {len(review_files)} file(s):")
+    for f in review_files:
+        print(f"       → {f}")
+
     result: ReviewResult = engine.review_files(
         files=review_files,
         rules=rules,
@@ -139,6 +150,19 @@ def run_review(
     )
 
     reporter.print_result(result, block_on_warning=config.block_on_warning)
+
+    if ai_review:
+        from agent.ai.ai_reviewer import run_ai_review
+        ai_code = run_ai_review(
+            files=review_files,
+            project_root=root,
+            language=ctx.language,
+            framework=ctx.framework,
+            api_key=config.get("ai_api_key"),
+            model=config.get("ai_model", "claude-haiku-4-5-20251001"),
+        )
+        if ai_code != 0:
+            return 1
 
     if result.has_blocking_issues(config.block_on_warning):
         return 1

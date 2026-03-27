@@ -1,0 +1,96 @@
+# AI Code Review Checks
+# Add, remove or edit checks here — Groq will follow these instructions.
+# Each check has a name and description (what to look for).
+
+checks:
+  - name: Security
+    description: >
+      Never hardcode secrets, API keys, or passwords — use env files or secret managers.
+      Validate and sanitize all user inputs; prevent XSS, SQL injection, CSRF.
+      Use HTTPS-safe cookies or secure headers; set CORS intentionally.
+      JWT with unique project-specific keys. Never expose stack traces to end users.
+
+  - name: Folder Structure
+    description: >
+      Check if the project layout follows B4G standards based on the detected framework.
+
+      For Express/Node.js projects the correct structure is:
+      src/config/ (env config), src/db/ (database), src/features/<feature>/ (controllers, routes, services, validations),
+      src/helpers/, src/middlewares/, src/models/, src/utils/, src/App.ts.
+      Routes should be lowercase with hyphens (/user-profile/:id).
+
+      For FastAPI projects: app/core/ (auth, config, schemas, utils, database.py),
+      app/features/<feature>/ (repository, router, schemas), app/models/, app/main.py.
+
+      For React.js projects: src/components/ (PascalCase), src/pages/, src/hooks/,
+      src/services/, src/store/, src/utils/, src/constants/, src/styles/, src/routes/.
+
+      For Next.js projects: app/ (page.tsx, layout.tsx), src/components/, src/services/,
+      src/store/, src/hooks/, src/constants/, src/styles/, src/utils/.
+
+      For React Native: src/components/, src/screens/, src/navigation/, src/services/,
+      src/store/, src/hooks/, src/utils/, src/constants/, src/assets/, src/styles/.
+
+      Flag any files that are in the wrong directory or missing from expected locations.
+
+  - name: Duplicate Code
+    description: >
+      Find repeated logic, copy-pasted blocks, or functions that do the same thing
+      in different files. Follow DRY principle — extract into a shared utility or module.
+      Flag any logic duplicated across routes, controllers, or services.
+
+  - name: Large Functions
+    description: >
+      Keep functions short and single-purpose. Flag functions longer than 40 lines
+      that should be split into smaller focused functions. Extract helpers when logic grows.
+
+  - name: Large Files
+    description: >
+      Each file should have a single responsibility (KISS, SOLID principles).
+      Flag files with more than 300 lines that should be split into separate modules.
+      Suggest how to break them up logically.
+
+  - name: Error Handling
+    description: >
+      Centralize error handling; never expose stack traces to end users.
+      UI — show friendly messages/fallbacks.
+      Backend — structured error payloads with consistent status codes: { success, message, data?, code? }.
+      Use contextual logs with correlation IDs where available.
+      Catch specific exceptions; avoid bare except/catch blocks.
+
+  - name: Performance
+    description: >
+      Prefer async I/O; avoid blocking calls (especially in Node.js).
+      Use memoization where appropriate.
+      Batch network calls, cache idempotent data, use pagination for large lists.
+      Avoid N+1 queries; use connection pooling.
+      Choose appropriate data structures; avoid excessive loops.
+
+  - name: Naming Conventions
+    description: >
+      camelCase for variables/functions; PascalCase for components/classes; snake_case for Python.
+      Use Id, 3d, 2d (not ID, 3D, 2D) in TypeScript.
+      Use === / !==; prefer undefined over null in JS/TS.
+      Use double quotes for strings; end statements with semicolons in JS/TS.
+      Route paths: lowercase with hyphens (/get-user-info).
+
+  - name: Dead Code
+    description: >
+      Remove dead code, unused imports, variables, functions, and console logs.
+      Keep structured logging in backends (Winston/Pino) — no console.log in production.
+      Remove commented-out code blocks.
+
+  - name: Code Quality
+    description: >
+      Follow DRY, KISS, SOLID principles.
+      Keep architecture simple — no unnecessary abstractions, design patterns, or multi-layer
+      indirection unless the problem truly requires it.
+      Import order — Core/framework → Third-party (A-Z) → Absolute (A-Z) → Relative (A-Z).
+      Validate all inputs on every API endpoint (Joi/Zod/express-validator).
+
+  - name: Missing Files
+    description: >
+      Check for missing important files such as .env.example, README.md, .gitignore.
+      Include/update README and .env.example if new env vars are introduced.
+      Flag .env or secrets files that should NOT be committed to git.
+      Check if test files exist for key modules.

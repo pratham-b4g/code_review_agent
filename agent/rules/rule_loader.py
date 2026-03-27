@@ -103,6 +103,7 @@ class RuleLoader:
         loaded_ids: set = set()
 
         for path in paths_to_load:
+            print(f"[INFO] Loading rules from : {path.name}")
             rules = self._load_file(path)
             for rule in rules:
                 rule_id = rule.get("id")

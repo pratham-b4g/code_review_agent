@@ -22,12 +22,14 @@ setup(
             "rules_data/python/*.json",
             "rules_data/javascript/*.json",
             "rules_data/typescript/*.json",
+            "ai/ai_checks.yaml",
         ],
     },
     include_package_data=True,
     install_requires=[
         "pyyaml>=6.0",
         "ruff>=0.1.0",
+        "groq>=0.9.0",
     ],
     extras_require={
         "dev": [
