@@ -44,6 +44,46 @@ class ProjectContext:
         return self.language == "python"
 
 
+def group_files_by_subproject(project_root: str, files: List[str]) -> dict:
+    """Group staged files by their subproject directory.
+
+    Returns a dict of { subproject_root: [files] }.
+    Files that don't belong to a subproject are grouped under project_root.
+
+    Example:
+        CT/client/src/App.tsx  → { "CT/client": [...] }
+        CT/server/src/index.ts → { "CT/server": [...] }
+    """
+    root = Path(project_root).resolve()
+    skip = {"node_modules", ".git", "venv", "dist", "build", "__pycache__"}
+    groups: dict = {}
+
+    for f in files:
+        try:
+            rel = Path(f).resolve().relative_to(root)
+        except ValueError:
+            groups.setdefault(str(root), []).append(f)
+            continue
+
+        if rel.parts:
+            subdir = root / rel.parts[0]
+            if (
+                subdir.is_dir()
+                and subdir.name not in skip
+                and (
+                    (subdir / "package.json").exists()
+                    or (subdir / "requirements.txt").exists()
+                    or (subdir / "pyproject.toml").exists()
+                )
+            ):
+                groups.setdefault(str(subdir), []).append(f)
+                continue
+
+        groups.setdefault(str(root), []).append(f)
+
+    return groups
+
+
 def _detect_subproject_root(project_root: str, files_to_review: List[str]) -> str:
     """If all staged files share a common subdirectory that has its own package.json
     or requirements.txt, use that subdirectory as the detection root.
