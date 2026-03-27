@@ -93,6 +93,7 @@ def install_hook(repo_root: Optional[str] = None, force: bool = False) -> bool:
         content = hook_path.read_text()
         if "Code Review Agent" in content:
             print(f"[INFO] Hook already installed at {hook_path}")
+            _prompt_api_key()
             return True
         print(f"[WARNING] A pre-commit hook already exists at {hook_path}")
         answer = input("Overwrite? [y/N] ").strip().lower()
