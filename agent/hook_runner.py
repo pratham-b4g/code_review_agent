@@ -72,6 +72,10 @@ def run_review(
         print("[INFO] No files to review.")
         return 0
 
+    # Normalize all paths to forward slashes — prevents Windows backslash
+    # issues from affecting rule matching, linting, and AI review downstream
+    review_files = [f.replace("\\", "/") for f in review_files]
+
     # Filter excluded paths
     excluded = config.exclude_paths
     review_files = [
