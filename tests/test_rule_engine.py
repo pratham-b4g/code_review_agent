@@ -238,6 +238,77 @@ class TestRuleEngine(unittest.TestCase):
         )
         self.assertEqual(len(result.violations), 0)
 
+    # -- exclude_file_patterns with full paths (bug fix) ------------------
+
+    def test_exclude_file_patterns_matches_basename(self) -> None:
+        """exclude_file_patterns like 'test_*.py' must match even on full paths."""
+        path = self._write_file("test_something.py", "eval('x')\n")
+        rule = {
+            **self._regex_rule("SEC001", r"\beval\s*\("),
+            "exclude_file_patterns": ["test_*.py"],
+        }
+        result = self.engine.review_files([path], [rule])
+        self.assertEqual(len(result.violations), 0)
+
+    def test_exclude_file_patterns_no_false_exclude(self) -> None:
+        """Non-matching files should still be checked."""
+        path = self._write_file("service.py", "eval('x')\n")
+        rule = {
+            **self._regex_rule("SEC001", r"\beval\s*\("),
+            "exclude_file_patterns": ["test_*.py"],
+        }
+        result = self.engine.review_files([path], [rule])
+        self.assertEqual(len(result.violations), 1)
+
+    # -- inline suppression (# noqa / // noqa / # cra-ignore) -------------
+
+    def test_noqa_suppresses_regex_violation(self) -> None:
+        path = self._write_file("test.py", "eval('ok')  # noqa\n")
+        rules = [self._regex_rule("SEC001", r"\beval\s*\(")]
+        result = self.engine.review_files([path], rules)
+        self.assertEqual(len(result.violations), 0)
+
+    def test_cra_ignore_suppresses_violation(self) -> None:
+        path = self._write_file("test.py", "eval('ok')  # cra-ignore\n")
+        rules = [self._regex_rule("SEC001", r"\beval\s*\(")]
+        result = self.engine.review_files([path], rules)
+        self.assertEqual(len(result.violations), 0)
+
+    def test_js_noqa_suppresses_violation(self) -> None:
+        path = self._write_file("test.js", "console.log('x'); // noqa\n")
+        rules = [self._regex_rule("JS001", r"console\.log")]
+        result = self.engine.review_files([path], rules)
+        self.assertEqual(len(result.violations), 0)
+
+    def test_line_without_noqa_still_flagged(self) -> None:
+        path = self._write_file("test.py", "eval('bad')\n")
+        rules = [self._regex_rule("SEC001", r"\beval\s*\(")]
+        result = self.engine.review_files([path], rules)
+        self.assertEqual(len(result.violations), 1)
+
+    # -- deduplication -----------------------------------------------------
+
+    def test_deduplicate_removes_exact_dupes(self) -> None:
+        from agent.utils.reporter import ReviewResult, Violation, Severity
+        result = ReviewResult()
+        v = Violation(
+            rule_id="X", rule_name="x", severity=Severity.ERROR,
+            file_path="a.py", line_number=1, message="msg",
+        )
+        result.violations = [v, v, v]
+        result.deduplicate()
+        self.assertEqual(len(result.violations), 1)
+
+    def test_deduplicate_keeps_different_rules(self) -> None:
+        from agent.utils.reporter import ReviewResult, Violation, Severity
+        result = ReviewResult()
+        result.violations = [
+            Violation(rule_id="A", rule_name="a", severity=Severity.ERROR, file_path="x.py", line_number=1, message="m1"),
+            Violation(rule_id="B", rule_name="b", severity=Severity.ERROR, file_path="x.py", line_number=1, message="m2"),
+        ]
+        result.deduplicate()
+        self.assertEqual(len(result.violations), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,7 @@ the same checks, keeping the agent dependency-free.
 """
 
 import re
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.analyzer.base_analyzer import BaseAnalyzer
@@ -64,6 +65,13 @@ class JavaScriptAnalyzer(BaseAnalyzer):
         "no_any_type": "_check_any_type",
         "use_flatlist": "_check_use_flatlist",
         "no_raw_anchor": "_check_raw_anchor",
+        # ── SonarQube-level checks ──
+        "nested_callback_depth": "_check_nested_callback_depth",
+        "too_many_params_js": "_check_too_many_params",
+        "duplicate_strings": "_check_duplicate_strings",
+        "no_dangerously_set_innerhtml": "_check_dangerously_set_innerhtml",
+        "async_without_try_catch": "_check_async_without_try_catch",
+        "no_unused_imports_js": "_check_unused_imports",
     }
 
     def run_ast_check(
@@ -253,4 +261,201 @@ class JavaScriptAnalyzer(BaseAnalyzer):
                     snippet=snippet,
                 )
             )
+        return violations
+
+    # ── SonarQube-level checks ────────────────────────────────────────
+
+    def _check_nested_callback_depth(
+        self, file_path: str, content: str, rule: Dict[str, Any]
+    ) -> List[Violation]:
+        """Detect deeply nested callbacks / arrow functions (callback hell)."""
+        max_depth = rule.get("threshold", 4)
+        violations = []
+        # Track nesting by counting open braces / arrow functions in scope
+        depth = 0
+        # Heuristic: track {, }, and arrow/function to estimate nesting
+        callback_re = re.compile(r'(=>\s*\{|function\s*\(|\bif\s*\(|\bfor\s*\(|\bwhile\s*\()')
+        open_re = re.compile(r'\{')
+        close_re = re.compile(r'\}')
+        for i, line in enumerate(content.splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith('//') or stripped.startswith('*'):
+                continue
+            depth += len(open_re.findall(line)) - len(close_re.findall(line))
+            if depth > max_depth and callback_re.search(line):
+                violations.append(
+                    _make_violation(
+                        rule, file_path, i,
+                        message_override=(
+                            f"Nesting depth {depth} exceeds threshold {max_depth}. "
+                            "Extract nested logic into separate functions."
+                        ),
+                        snippet=line,
+                    )
+                )
+        return violations
+
+    def _check_too_many_params(
+        self, file_path: str, content: str, rule: Dict[str, Any]
+    ) -> List[Violation]:
+        """Flag functions/arrow functions with too many parameters."""
+        max_params = rule.get("threshold", 5)
+        violations = []
+        # Match: function name(a, b, c, d, e, f) or (a, b, c, d, e, f) =>
+        pattern = re.compile(
+            r'(?:function\s+\w+|(?:const|let|var)\s+\w+\s*=\s*(?:async\s*)?)?'
+            r'\(([^)]{10,})\)\s*(?:=>|\{)',
+        )
+        for i, line in enumerate(content.splitlines(), start=1):
+            m = pattern.search(line)
+            if m:
+                params = [p.strip() for p in m.group(1).split(',') if p.strip()]
+                # Filter out destructured objects counted as one param
+                if len(params) > max_params:
+                    violations.append(
+                        _make_violation(
+                            rule, file_path, i,
+                            message_override=(
+                                f"Function has {len(params)} parameters "
+                                f"(max {max_params}). Use an options/config object instead."
+                            ),
+                            snippet=line,
+                        )
+                    )
+        return violations
+
+    def _check_duplicate_strings(
+        self, file_path: str, content: str, rule: Dict[str, Any]
+    ) -> List[Violation]:
+        """Flag string literals that appear 3+ times (extract to constant)."""
+        threshold = rule.get("threshold", 3)
+        violations = []
+        # Find all string literals >= 6 chars (skip short ones like 'id', 'a')
+        string_re = re.compile(r'''['"]([^'"\n]{6,})['"]''')
+        all_strings: List[Tuple[str, int]] = []
+        for i, line in enumerate(content.splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith('//') or stripped.startswith('*') or stripped.startswith('import '):
+                continue
+            for m in string_re.finditer(line):
+                all_strings.append((m.group(1), i))
+
+        counts = Counter(s for s, _ in all_strings)
+        reported: set = set()
+        for s, line_no in all_strings:
+            if counts[s] >= threshold and s not in reported:
+                reported.add(s)
+                violations.append(
+                    _make_violation(
+                        rule, file_path, line_no,
+                        message_override=(
+                            f"String '{s[:40]}' is duplicated {counts[s]} times. "
+                            "Extract to a named constant."
+                        ),
+                        snippet=content.splitlines()[line_no - 1] if line_no <= len(content.splitlines()) else "",
+                    )
+                )
+        return violations
+
+    def _check_dangerously_set_innerhtml(
+        self, file_path: str, content: str, rule: Dict[str, Any]
+    ) -> List[Violation]:
+        """Detect dangerouslySetInnerHTML usage (XSS security hotspot)."""
+        pattern = r'dangerouslySetInnerHTML'
+        violations = []
+        for i, line in enumerate(content.splitlines(), start=1):
+            if pattern in line:
+                stripped = line.strip()
+                if stripped.startswith('//') or stripped.startswith('*'):
+                    continue
+                violations.append(
+                    _make_violation(
+                        rule, file_path, i,
+                        message_override=(
+                            "dangerouslySetInnerHTML is an XSS risk. "
+                            "Sanitize HTML with DOMPurify before rendering."
+                        ),
+                        snippet=line,
+                    )
+                )
+        return violations
+
+    def _check_async_without_try_catch(
+        self, file_path: str, content: str, rule: Dict[str, Any]
+    ) -> List[Violation]:
+        """Flag async functions that have no try/catch (unhandled promise rejection)."""
+        violations = []
+        # Find async function blocks and check if they contain try
+        async_re = re.compile(r'async\s+(?:function\s+\w+|\w+\s*=\s*async)\s*\([^)]*\)\s*\{')
+        lines = content.splitlines()
+        for i, line in enumerate(lines, start=1):
+            if async_re.search(line):
+                # Look ahead in the function body for 'try {'
+                # Simple heuristic: scan next 50 lines for 'try'
+                block = '\n'.join(lines[i:min(i + 50, len(lines))])
+                if 'try' not in block and '.catch' not in block:
+                    violations.append(
+                        _make_violation(
+                            rule, file_path, i,
+                            message_override=(
+                                "Async function without try/catch. "
+                                "Wrap in try/catch or add .catch() to handle rejections."
+                            ),
+                            snippet=line,
+                        )
+                    )
+        return violations
+
+    def _check_unused_imports(
+        self, file_path: str, content: str, rule: Dict[str, Any]
+    ) -> List[Violation]:
+        """Heuristic check for unused ES module imports in JS/TS files."""
+        violations = []
+        import_re = re.compile(
+            r'import\s+(?:'
+            r'(?:\{\s*([^}]+)\s*\})'
+            r'|([A-Za-z_$][\w$]*)'
+            r'|(?:([A-Za-z_$][\w$]*)\s*,\s*\{\s*([^}]+)\s*\})'
+            r')\s+from\s+[\'"]'
+        )
+        for i, line in enumerate(content.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped.startswith('import '):
+                continue
+            m = import_re.search(line)
+            if not m:
+                continue
+            names: List[str] = []
+            # Named imports { a, b as c }
+            for group_idx in (0, 3):
+                group = m.group(group_idx + 1)
+                if group:
+                    for part in group.split(','):
+                        part = part.strip()
+                        if ' as ' in part:
+                            part = part.split(' as ')[-1].strip()
+                        if part:
+                            names.append(part)
+            # Default import
+            if m.group(2):
+                names.append(m.group(2))
+            if m.group(3):
+                names.append(m.group(3))
+            # Check if each name is used anywhere else in the file
+            rest_of_file = content[:content.find(line)] + content[content.find(line) + len(line):]
+            for name in names:
+                if not name or name == 'type':
+                    continue
+                # Use word-boundary search to find usage
+                usage = re.search(r'\b' + re.escape(name) + r'\b', rest_of_file)
+                if not usage:
+                    violations.append(
+                        _make_violation(
+                            rule, file_path, i,
+                            message_override=(
+                                f"Import '{name}' is never used. Remove the unused import."
+                            ),
+                            snippet=line,
+                        )
+                    )
         return violations

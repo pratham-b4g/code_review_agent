@@ -1,1 +1,2 @@
 recursive-include agent/rules_data *.json
+include agent/ai/ai_checks.yaml

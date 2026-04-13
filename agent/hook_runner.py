@@ -5,18 +5,32 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from agent.baseline import filter_new_violations, load_baseline
+from agent.analyzer.taint_analyzer import run_taint_analysis
+from agent.analyzer.cross_file_analyzer import (
+    detect_architecture_issues,
+    detect_cross_file_duplicates,
+    detect_missing_test_files,
+)
 from agent.analyzer.javascript_analyzer import JavaScriptAnalyzer
 from agent.analyzer.python_analyzer import PythonAnalyzer
 from agent.detector.language_detector import LanguageDetector
 from agent.detector.project_context import build_project_context, group_files_by_subproject
-from agent.git.git_utils import collect_files_for_push, get_repo_root, get_staged_files, scan_directory
+from agent.git.git_utils import (
+    collect_files_for_push,
+    get_changed_lines,
+    get_repo_root,
+    get_staged_files,
+    scan_directory,
+)
 from agent.rules.api_fetcher import ApiFetcher
 from agent.rules.rule_engine import RuleEngine
 from agent.rules.rule_loader import RuleLoader
 from agent.linter.lint_runner import run_linting
 from agent.utils.config_manager import ConfigManager
 from agent.utils.logger import get_logger, set_global_log_level
-from agent.utils.reporter import Reporter, ReviewResult
+from agent.utils.report_generator import generate_report_file
+from agent.utils.reporter import Reporter, ReviewResult, Severity, Violation
 
 logger = get_logger(__name__)
 
@@ -116,7 +130,12 @@ def run_review(
 
         # ── Load rules ──────────────────────────────────────────────────
         loader = RuleLoader(rules_dir=config.rules_dir)
-        rules = loader.load_rules(language=ctx.language, framework=ctx.framework)
+        severity_overrides = config.get("severity_overrides", {}) or {}
+        rules = loader.load_rules(
+            language=ctx.language,
+            framework=ctx.framework,
+            severity_overrides=severity_overrides,
+        )
         print(f"[INFO] Rules loaded: {len(rules)} rule(s)")
 
         # Optionally merge rules from a remote API
@@ -135,6 +154,20 @@ def run_review(
             print(f"[WARNING] No rules found for language='{ctx.language}' framework='{ctx.framework}'.")
             continue
 
+        # ── Auto-fix if requested ─────────────────────────────────────────
+        auto_fix = os.environ.get("CRA_AUTO_FIX") == "1"
+        if auto_fix and not skip_lint:
+            from agent.linter.lint_runner import run_autofix
+            unsafe = os.environ.get("CRA_UNSAFE_FIXES") == "1"
+            run_autofix(
+                files=subproject_files,
+                language=ctx.language,
+                project_root=subproject_root,
+                framework=ctx.framework,
+                python_linter=config.get("python_linter", "auto"),
+                unsafe_fixes=unsafe,
+            )
+
         # ── Run linting first ────────────────────────────────────────────
         if not skip_lint and config.get("run_linting", True):
             lint_code = run_linting(
@@ -146,14 +179,30 @@ def run_review(
                 js_linter=config.get("js_linter", "eslint"),
             )
             if lint_code != 0:
-                print("\n[BLOCKED] Fix linting errors before the rules check runs.")
-                final_code = 1
-                continue
+                if auto_fix:
+                    print("\n[WARNING] Some lint errors could not be auto-fixed. Continuing with review...")
+                else:
+                    print("\n[BLOCKED] Fix linting errors before the rules check runs.")
+                    print("          TIP: Run 'python main.py fix --dir <project>' or add --fix to auto-fix first.")
+                    final_code = 1
+                    continue
 
         # ── Build engine with language-specific analyzers ────────────────
         py_analyzer = PythonAnalyzer()
         js_analyzer = JavaScriptAnalyzer()
         engine = RuleEngine(python_analyzer=py_analyzer, js_analyzer=js_analyzer)
+
+        # ── Build changed-lines map for diff-only mode ─────────────────
+        diff_only = config.get("diff_only", False) or os.environ.get("CRA_DIFF_ONLY") == "1"
+        changed_lines_map = None
+        if diff_only:
+            changed_lines_map = {}
+            for f in subproject_files:
+                cl = get_changed_lines(f, cwd=subproject_root)
+                if cl is not None:
+                    changed_lines_map[f] = cl
+                # None → new file, check everything (don't add to map)
+            print(f"[INFO] Diff-only mode: flagging only changed lines")
 
         # ── Run review ───────────────────────────────────────────────────
         print(f"[INFO] Evaluating {len(subproject_files)} file(s):")
@@ -165,9 +214,111 @@ def run_review(
             rules=rules,
             max_file_size_bytes=config.max_file_size_bytes,
             exclude_paths=config.exclude_paths,
+            changed_lines_map=changed_lines_map,
         )
 
+        # ── Cross-file analysis ─────────────────────────────────────
+        cross_violations: list = []
+
+        # 1. Cross-file duplicate detection
+        dup_violations, dup_stats = detect_cross_file_duplicates(
+            files=subproject_files, language=ctx.language,
+        )
+        cross_violations.extend(dup_violations)
+
+        # Show duplication percentage
+        dup_pct = dup_stats.percentage
+        print(f"\n  📊 Code Duplication: {dup_pct}% ({dup_stats.duplicated_lines} duplicated lines / {dup_stats.total_lines} total lines)")
+
+        # Block if duplication exceeds threshold
+        max_dup_pct = float(config.get("max_duplication_percent", 10))
+        if dup_pct > max_dup_pct:
+            result.violations.append(
+                Violation(
+                    rule_id="DUP_GATE",
+                    rule_name="duplication_threshold_exceeded",
+                    severity=Severity.ERROR,
+                    file_path=subproject_root,
+                    line_number=0,
+                    message=(
+                        f"Code duplication is {dup_pct}% which exceeds the allowed threshold of {max_dup_pct}%. "
+                        f"Reduce duplication by extracting shared logic into utility modules."
+                    ),
+                    fix_suggestion=(
+                        f"Identify the {len(dup_violations)} duplicate block(s) listed above and refactor "
+                        f"them into shared helper functions in a utils/ or common/ module."
+                    ),
+                    category="duplication",
+                )
+            )
+            print(f"  🔴 BLOCKED: Duplication {dup_pct}% exceeds max allowed {max_dup_pct}%")
+        elif dup_pct > 0:
+            print(f"  ✅ Duplication within threshold ({max_dup_pct}% max)")
+
+        # 2. Missing test file detection
+        test_violations = detect_missing_test_files(
+            files=subproject_files,
+            project_root=subproject_root,
+            language=ctx.language,
+        )
+        cross_violations.extend(test_violations)
+
+        # 3. Architecture / structure suggestions
+        arch_violations = detect_architecture_issues(
+            project_root=subproject_root,
+            language=ctx.language,
+            framework=ctx.framework,
+            files=subproject_files,
+        )
+        cross_violations.extend(arch_violations)
+
+        # 4. Taint / data-flow analysis (Python only)
+        if ctx.language == "python":
+            for f in subproject_files:
+                if f.endswith(".py"):
+                    try:
+                        src = Path(f).read_text(encoding="utf-8", errors="replace")
+                        taint_v = run_taint_analysis(f, src)
+                        cross_violations.extend(taint_v)
+                    except OSError:
+                        pass
+
+        # Merge cross-file violations into the main result
+        result.violations.extend(cross_violations)
+
+        # Remove duplicate violations (same file + line + rule_id)
+        result.deduplicate()
+
+        # ── Baseline filtering (ignore known/existing violations) ──────
+        use_baseline = config.get("use_baseline", False)
+        if use_baseline:
+            baseline_keys = load_baseline(subproject_root)
+            if baseline_keys:
+                result.violations, suppressed = filter_new_violations(
+                    result.violations, baseline_keys,
+                )
+                if suppressed:
+                    print(f"[INFO] Baseline: {suppressed} known violation(s) suppressed, {len(result.violations)} new issue(s)")
+
         reporter.print_result(result, block_on_warning=config.block_on_warning)
+
+        # ── Report file generation ─────────────────────────────────────
+        report_threshold = int(config.get("report_file_threshold", 15))
+        force_report = os.environ.get("CRA_FORCE_REPORT") == "1"
+        total_violations = len(result.violations)
+        if total_violations > report_threshold or (force_report and total_violations > 0):
+            report_path = generate_report_file(
+                result=result,
+                project_root=subproject_root,
+                language=ctx.language,
+                framework=ctx.framework or "",
+                duplication_stats=dup_stats,
+            )
+            print(
+                f"\n  📋 {total_violations} violations exceed threshold ({report_threshold})."
+                f"\n     Detailed report saved to: {report_path}"
+                f"\n     Open it in your editor to review and fix issues one by one.\n"
+            )
 
         ai_issues: list = []
         if ai_review:

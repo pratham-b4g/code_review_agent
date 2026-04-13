@@ -22,8 +22,14 @@ _LAST_REPORT_PATH = _CRA_DIR / "last_report.json"
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
-# ── Power Automate webhook — hardcoded, update here when the flow URL changes ──
-_FLOW_URL = "https://defaultcff20d814abd4f219998f39afd1df6.2a.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/243a9a7a866c46dca7f63ba89b2feced/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=YOxpQhyv1jIB2Cc2UDF7bX4PEXz0BTKb0Nnl2Kw7_RI"
+# ── Power Automate webhook — read from env; falls back to hardcoded default ──
+_FLOW_URL = os.getenv(
+    "CRA_FLOW_URL",
+    "https://defaultcff20d814abd4f219998f39afd1df6.2a.environment.api.powerplatform.com:443"
+    "/powerautomate/automations/direct/workflows/243a9a7a866c46dca7f63ba89b2feced"
+    "/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun"
+    "&sv=1.0&sig=YOxpQhyv1jIB2Cc2UDF7bX4PEXz0BTKb0Nnl2Kw7_RI",
+)
 
 
 # ── HMAC Security ─────────────────────────────────────────────────────────────

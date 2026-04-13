@@ -351,8 +351,9 @@ PYTHON="{python_bin}"
 unset VIRTUAL_ENV
 unset PYTHONHOME
 
-# Review only staged files before the commit is created (with AI review)
-"$PYTHON" -m agent.cli review --staged --ai
+# Review only staged files before the commit is created
+# Add --ai to enable AI-powered deep review (requires an API key)
+"$PYTHON" -m agent.cli review --staged
 STATUS=$?
 exit $STATUS
 """

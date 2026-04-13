@@ -20,8 +20,8 @@ _JS_FRAMEWORK_DEPS: Dict[str, str] = {
     "express": "express",
     "fastify": "fastify",
     "koa": "koa",
-    "hapi": "@hapi/hapi",
-    "nest": "@nestjs/core",
+    "@hapi/hapi": "hapi",
+    "@nestjs/core": "nest",
 }
 
 # Python requirement keywords → framework

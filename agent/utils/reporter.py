@@ -84,6 +84,34 @@ class ReviewResult:
             return True
         return False
 
+    def deduplicate(self) -> None:
+        """Remove duplicate violations (same file + line + rule_id)."""
+        seen: set = set()
+        unique: List[Violation] = []
+        for v in self.violations:
+            key = (v.file_path, v.line_number, v.rule_id)
+            if key not in seen:
+                seen.add(key)
+                unique.append(v)
+        self.violations = unique
+
+
+_CATEGORY_WHY: Dict[str, str] = {
+    "security": "Security flaws can be exploited by attackers to steal data or execute malicious code.",
+    "secrets": "Hardcoded secrets in code can be extracted by anyone with repo access.",
+    "error_handling": "Poor error handling hides bugs and causes unexpected crashes in production.",
+    "maintainability": "High complexity makes code harder to understand, test, and safely modify.",
+    "style": "Inconsistent style increases cognitive load and slows down code reviews.",
+    "type_safety": "Weak types let bugs slip through that the compiler could have caught.",
+    "duplication": "Duplicated code means fixes must be applied in multiple places — easy to miss one.",
+    "test_coverage": "Missing tests mean changes can break existing features without anyone noticing.",
+    "architecture": "Structural issues make onboarding harder and increase maintenance cost.",
+    "performance": "Performance issues cause slow responses and poor user experience.",
+    "convention": "Naming/convention violations make the codebase inconsistent and harder to navigate.",
+    "correctness": "This pattern is likely a bug that will cause incorrect behavior at runtime.",
+    "dead_code": "Dead code clutters the codebase and confuses developers about what is actually used.",
+}
+
 
 class Reporter:
     """Formats and prints review results to stdout."""
@@ -110,10 +138,10 @@ class Reporter:
             lines.append(f"  Framework : {self._c(framework, _CYAN)}")
         lines.append(self._c("=" * 62, _BOLD))
         lines.append("")
-        print("<br>".join(lines))
+        print("\n".join(lines))
 
     def print_result(self, result: ReviewResult, block_on_warning: bool = False) -> None:
-        """Print all violations and the final summary."""
+        """Print all violations with human-readable guidance."""
         if not result.violations:
             ok = (
                 f"\n  {self._c('✔ All checks passed!', _GREEN, _BOLD)}"
@@ -135,12 +163,23 @@ class Reporter:
                 icon = SEVERITY_ICONS.get(v.severity, "•")
                 label = f"[{v.severity.value.upper():7}]"
                 loc = f"L{v.line_number}" if v.line_number > 0 else "file"
+
+                # ── Main violation line ──
                 print(
                     f"    {self._c(icon + ' ' + label, color)}"
                     f"  {loc:>6}  {self._c(v.rule_id, _BOLD)} — {v.message}"
                 )
+
+                # ── Code snippet (what the problematic code looks like) ──
                 if v.snippet:
                     print(f"             {self._c('→', _CYAN)} {v.snippet.strip()[:120]}")
+
+                # ── Human-readable "why" explanation ──
+                why = _CATEGORY_WHY.get(v.category.lower(), "") if v.category else ""
+                if why:
+                    print(f"             {self._c('Why:', _YELLOW)} {why}")
+
+                # ── How to fix it ──
                 if v.fix_suggestion:
                     print(f"             {self._c('Fix:', _GREEN)} {v.fix_suggestion}")
 

@@ -10,6 +10,21 @@ from agent.utils.reporter import ReviewResult, Severity, Violation
 
 logger = get_logger(__name__)
 
+# Inline suppression markers — lines containing these are excluded from violations
+_SUPPRESSION_RE = re.compile(
+    r"(?:#|//)\s*(?:noqa|noinspection|cra-ignore)(?:\s|$|:)", re.IGNORECASE
+)
+
+
+def _build_suppressed_lines(content: str) -> frozenset:
+    """Return a frozenset of 1-indexed line numbers that have an inline suppression comment."""
+    suppressed = set()
+    for i, line in enumerate(content.splitlines(), start=1):
+        if _SUPPRESSION_RE.search(line):
+            suppressed.add(i)
+    return frozenset(suppressed)
+
+
 # AST check identifiers supported by this engine
 _AST_CHECKS = frozenset(
     [
@@ -20,6 +35,27 @@ _AST_CHECKS = frozenset(
         "missing_type_hints",
         "snake_case_functions",
         "no_unused_imports",
+        # Python SonarQube-level
+        "mutable_default_args",
+        "cognitive_complexity",
+        "too_many_params",
+        "shell_injection",
+        "unsafe_deserialization",
+        "empty_except_body",
+        "unreachable_code",
+        "is_literal_comparison",
+        "unused_variables",
+        "fstring_no_placeholder",
+        "empty_function_body",
+        "duplicate_strings_py",
+        "cyclomatic_complexity",
+        # JS/TS SonarQube-level
+        "nested_callback_depth",
+        "too_many_params_js",
+        "duplicate_strings",
+        "no_dangerously_set_innerhtml",
+        "async_without_try_catch",
+        "no_unused_imports_js",
     ]
 )
 
@@ -44,6 +80,7 @@ class RuleEngine:
         rules: List[Dict[str, Any]],
         max_file_size_bytes: int = 512_000,
         exclude_paths: Optional[List[str]] = None,
+        changed_lines_map: Optional[Dict[str, set]] = None,
     ) -> ReviewResult:
         """Run all rules against all provided files.
 
@@ -76,6 +113,16 @@ class RuleEngine:
                 continue
 
             violations = self._review_single_file(file_path, rules)
+
+            # Diff-only mode: only keep violations on changed lines
+            if changed_lines_map is not None:
+                changed = changed_lines_map.get(file_path)
+                if changed is not None:
+                    violations = [
+                        v for v in violations
+                        if v.line_number == 0 or v.line_number in changed
+                    ]
+
             result.violations.extend(violations)
             result.files_scanned += 1
 
@@ -98,6 +145,9 @@ class RuleEngine:
             logger.warning("Cannot read %s: %s", file_path, exc)
             return []
 
+        # Build set of lines with inline suppression (# noqa / // noqa / # cra-ignore)
+        suppressed_lines = _build_suppressed_lines(content)
+
         for rule in rules:
             if not rule.get("enabled", True):
                 continue
@@ -107,8 +157,13 @@ class RuleEngine:
                 continue
 
             exclude_patterns = rule.get("exclude_file_patterns", [])
-            if any(fnmatch.fnmatch(file_path, pat) for pat in exclude_patterns):
-                continue
+            if exclude_patterns:
+                basename = Path(file_path).name
+                if any(
+                    fnmatch.fnmatch(basename, pat) or fnmatch.fnmatch(file_path, pat)
+                    for pat in exclude_patterns
+                ):
+                    continue
 
             rule_type = rule.get("type", "regex").lower()
 
@@ -120,6 +175,13 @@ class RuleEngine:
                 v = self._apply_filename_rule(file_path, rule)
                 if v:
                     violations.append(v)
+
+        # Filter out violations on suppressed lines
+        if suppressed_lines:
+            violations = [
+                v for v in violations
+                if v.line_number not in suppressed_lines
+            ]
 
         return violations
 

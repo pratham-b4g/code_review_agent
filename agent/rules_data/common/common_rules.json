@@ -83,6 +83,58 @@
       "fix_suggestion": "Add .env to .gitignore and use .env.example with placeholder values instead.",
       "file_extensions": [],
       "enabled": true
+    },
+    {
+      "id": "COM007",
+      "name": "no_sql_injection",
+      "description": "Detect raw string formatting in SQL queries (SQL injection risk)",
+      "severity": "error",
+      "category": "security",
+      "type": "regex",
+      "pattern": "(?i)(execute|query|raw|rawQuery|cursor\\.execute)\\s*\\([^)]*(%s|%d|\\{|\\$\\{|\\.format\\(|\\+ *['\"]|f['\"])",
+      "message": "Potential SQL injection: raw string formatting in SQL query. Use parameterized queries.",
+      "fix_suggestion": "Use parameterized queries: cursor.execute('SELECT * FROM t WHERE id = %s', (id,))",
+      "file_extensions": [".py", ".js", ".ts", ".jsx", ".tsx"],
+      "enabled": true
+    },
+    {
+      "id": "COM008",
+      "name": "no_open_redirect",
+      "description": "Redirecting to user-controlled URLs without validation (open redirect vulnerability)",
+      "severity": "error",
+      "category": "security",
+      "type": "regex",
+      "pattern": "(?i)(redirect|res\\.redirect|window\\.location|location\\.href|location\\.assign|location\\.replace)\\s*[=(]\\s*(req\\.|request\\.|params\\.|query\\.|body\\.)",
+      "message": "Potential open redirect: user-controlled value used in redirect without validation.",
+      "fix_suggestion": "Validate the redirect URL against an allowlist of trusted domains before redirecting.",
+      "file_extensions": [".py", ".js", ".ts", ".jsx", ".tsx"],
+      "enabled": true
+    },
+    {
+      "id": "COM009",
+      "name": "no_ssrf_patterns",
+      "description": "Detect user-controlled values passed directly to HTTP request functions (SSRF)",
+      "severity": "error",
+      "category": "security",
+      "type": "regex",
+      "pattern": "(?i)(requests\\.(get|post|put|delete|patch)|fetch|axios\\.(get|post|put|delete|patch)|urllib\\.request\\.urlopen|http\\.get)\\s*\\(\\s*(req\\.|request\\.|params\\.|query\\.|body\\.|args\\.)",
+      "message": "Potential SSRF: user-controlled value passed directly to HTTP request.",
+      "fix_suggestion": "Validate and allowlist the target URL/domain before making the request.",
+      "file_extensions": [".py", ".js", ".ts", ".jsx", ".tsx"],
+      "enabled": true
+    },
+    {
+      "id": "COM010",
+      "name": "no_empty_blocks",
+      "description": "Empty code blocks (if, for, while with no body) are usually a mistake",
+      "severity": "warning",
+      "category": "bug",
+      "type": "regex",
+      "pattern": "(if|for|while|else)\\s*\\([^)]*\\)\\s*\\{\\s*\\}|:\\s*$",
+      "message": "Empty code block detected. Add the intended logic or remove the block.",
+      "fix_suggestion": "Add the missing implementation or add a comment explaining why it's intentionally empty.",
+      "file_extensions": [".js", ".ts", ".jsx", ".tsx"],
+      "enabled": true
     }
   ]
 }

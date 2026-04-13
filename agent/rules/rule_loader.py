@@ -30,7 +30,12 @@ class RuleLoader:
         self.rules_dir = Path(rules_dir) if rules_dir else _BUNDLED_RULES_DIR
         logger.debug("Rules directory: %s", self.rules_dir)
 
-    def load_rules(self, language: str, framework: Optional[str]) -> List[Dict[str, Any]]:
+    def load_rules(
+        self,
+        language: str,
+        framework: Optional[str],
+        severity_overrides: Optional[Dict[str, str]] = None,
+    ) -> List[Dict[str, Any]]:
         """Return the merged list of applicable rules for the given context.
 
         Load order (later files may add more rules, they do NOT override):
@@ -114,6 +119,18 @@ class RuleLoader:
                     all_rules.append(rule)
                     if rule_id:
                         loaded_ids.add(rule_id)
+
+        # Apply per-project severity overrides: {"PY003": "error"} etc.
+        if severity_overrides:
+            valid_severities = {"info", "warning", "error"}
+            for rule in all_rules:
+                rule_id = rule.get("id", "")
+                override = severity_overrides.get(rule_id)
+                if override and override.lower() in valid_severities:
+                    original = rule.get("severity", "warning")
+                    rule["severity"] = override.lower()
+                    if original != override.lower():
+                        logger.info("Severity override: %s  %s → %s", rule_id, original, override.lower())
 
         logger.debug(
             "Loaded %d rules for language='%s' framework='%s'",

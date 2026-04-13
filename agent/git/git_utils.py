@@ -149,6 +149,64 @@ def collect_files_for_push() -> List[str]:
     return _filter_gitignored(unique)
 
 
+def get_changed_lines(file_path: str, cwd: Optional[str] = None) -> Optional[set]:
+    """Return a set of 1-indexed line numbers that were changed in the working tree.
+
+    Uses ``git diff -U0`` to find only added/modified lines.  Returns None if
+    the diff cannot be computed (e.g. new untracked file) — the caller should
+    treat None as "check all lines".
+    """
+    # Try staged diff first, then HEAD diff
+    for diff_args in (
+        ["diff", "--cached", "-U0", "--", file_path],
+        ["diff", "HEAD", "-U0", "--", file_path],
+        ["diff", "-U0", "--", file_path],
+    ):
+        code, out, _ = _run_git(*diff_args, cwd=cwd)
+        if code == 0 and out.strip():
+            break
+    else:
+        return None  # file might be new/untracked — check everything
+
+    changed: set = set()
+    for line in out.splitlines():
+        # Unified diff hunk header: @@ -old_start,old_count +new_start,new_count @@
+        if not line.startswith("@@"):
+            continue
+        # Extract the +side (new file lines)
+        import re as _re
+        m = _re.search(r"\+(\d+)(?:,(\d+))?", line)
+        if m:
+            start = int(m.group(1))
+            count = int(m.group(2)) if m.group(2) else 1
+            for i in range(start, start + count):
+                changed.add(i)
+    return changed if changed else None
+
+
+def get_changed_lines_between(
+    file_path: str,
+    base_ref: str = "HEAD",
+    cwd: Optional[str] = None,
+) -> Optional[set]:
+    """Return changed lines between a base ref and the working tree for a single file."""
+    code, out, _ = _run_git("diff", base_ref, "-U0", "--", file_path, cwd=cwd)
+    if code != 0 or not out.strip():
+        return None
+    changed: set = set()
+    for line in out.splitlines():
+        if not line.startswith("@@"):
+            continue
+        import re as _re
+        m = _re.search(r"\+(\d+)(?:,(\d+))?", line)
+        if m:
+            start = int(m.group(1))
+            count = int(m.group(2)) if m.group(2) else 1
+            for i in range(start, start + count):
+                changed.add(i)
+    return changed if changed else None
+
+
 def file_exists_in_repo(rel_path: str) -> bool:
     """Return True if a file exists at the given path relative to CWD."""
     return Path(rel_path).is_file()

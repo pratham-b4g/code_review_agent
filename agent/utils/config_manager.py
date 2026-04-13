@@ -35,6 +35,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "include_extensions": [],    # Empty → determined by detected language
     "max_file_size_kb": 500,
     "use_color": True,
+    "diff_only": False,          # True → only flag violations on changed lines
+    "severity_overrides": {},    # Per-project severity: {"PY003": "error", "COM002": "info"}
+    "report_file_threshold": 15, # Auto-generate report file if violations exceed this
+    "max_duplication_percent": 10, # Block commit if code duplication exceeds this % (0 to disable)
 }
 
 # Config file names searched in order (project root takes precedence)

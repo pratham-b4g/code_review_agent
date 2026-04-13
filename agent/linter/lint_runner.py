@@ -1,5 +1,6 @@
 """Runs ESLint (JS/TS) or ruff/flake8 (Python) on the files being committed."""
 
+import re
 import subprocess
 import shutil
 import sys
@@ -282,6 +283,186 @@ def _has_eslint_config(project_root: str) -> bool:
         except Exception:
             pass
     return any((root / f).exists() for f in config_files)
+
+
+# ── Autofix ───────────────────────────────────────────────────────────────────
+
+def run_autofix(
+    files: List[str],
+    language: str,
+    project_root: str,
+    framework: Optional[str] = None,
+    python_linter: str = "auto",
+    unsafe_fixes: bool = False,
+) -> int:
+    """Run auto-fix on the given files: ruff --fix for Python, eslint --fix for JS.
+
+    Args:
+        files:          List of file paths to fix.
+        language:       Detected project language.
+        project_root:   Root directory of the project.
+        framework:      Detected framework.
+        python_linter:  Which Python linter to use.
+        unsafe_fixes:   If True, also apply ruff's unsafe fixes.
+
+    Returns:
+        0 if autofix ran successfully, 1 if there were remaining unfixable errors.
+    """
+    py_files = [f for f in files if f.endswith(".py")]
+    js_files = [f for f in files if Path(f).suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs"}]
+
+    fixed_count = 0
+    remaining = 0
+
+    if py_files:
+        fc, rm = _autofix_python(py_files, python_linter, unsafe_fixes)
+        fixed_count += fc
+        remaining += rm
+
+    if js_files:
+        fc, rm = _autofix_js(js_files, project_root, framework)
+        fixed_count += fc
+        remaining += rm
+
+    print(f"\n{_CYAN}{_BOLD}── Autofix Summary {'─' * 49}{_RESET}")
+    if fixed_count:
+        print(f"  {_CYAN}✔ Fixed {fixed_count} issue(s) automatically.{_RESET}")
+    if remaining:
+        print(f"  {_YELLOW}⚠ {remaining} issue(s) remain and need manual attention.{_RESET}")
+    if not fixed_count and not remaining:
+        print(f"  {_CYAN}✔ No issues to fix — code is clean.{_RESET}")
+    print()
+
+    return 1 if remaining else 0
+
+
+def _autofix_python(files: List[str], linter: str, unsafe_fixes: bool) -> tuple:
+    """Run ruff check --fix and ruff format on Python files.
+
+    Returns:
+        (fixed_count, remaining_count)
+    """
+    tool = _pick_python_linter(linter)
+    if tool is None or "flake8" in (tool or ""):
+        # flake8 doesn't have --fix; fall back to ruff
+        tool = f"{sys.executable} -m ruff"
+
+    label = "ruff"
+    print(f"\n{_CYAN}{_BOLD}── Python Autofix ({label}) {'─' * 40}{_RESET}")
+
+    # Step 1: ruff check --fix (lint rules: F401, I001, UP007, UP035, etc.)
+    fix_cmd = tool.split() + ["check", "--fix"]
+    if unsafe_fixes:
+        fix_cmd.append("--unsafe-fixes")
+    fix_cmd += files
+
+    print(f"  Running: {label} check --fix{'--unsafe-fixes' if unsafe_fixes else ''}...")
+    fix_result = subprocess.run(
+        fix_cmd, capture_output=True, text=True,
+    )
+
+    # Count fixed issues from ruff output
+    fixed = 0
+    remaining = 0
+    for line in (fix_result.stdout + fix_result.stderr).splitlines():
+        if "Fixed" in line:
+            # e.g. "Fixed 42 errors."
+            m = re.search(r"Fixed (\d+)", line)
+            if m:
+                fixed += int(m.group(1))
+        if "fixable" in line.lower():
+            # Still remaining
+            pass
+
+    if fix_result.stdout.strip():
+        print(fix_result.stdout.strip())
+    if fix_result.stderr.strip():
+        # ruff prints summary to stderr
+        for line in fix_result.stderr.strip().splitlines():
+            if line.strip():
+                print(f"  {line.strip()}")
+
+    # Step 2: ruff format (whitespace, trailing whitespace, blank lines, etc.)
+    fmt_cmd = tool.split() + ["format"] + files
+    print(f"  Running: {label} format...")
+    fmt_result = subprocess.run(
+        fmt_cmd, capture_output=True, text=True,
+    )
+    formatted = 0
+    for line in (fmt_result.stdout + fmt_result.stderr).splitlines():
+        if "file" in line.lower() and ("reformatted" in line.lower() or "changed" in line.lower()):
+            m = re.search(r"(\d+) file", line)
+            if m:
+                formatted += int(m.group(1))
+    if formatted:
+        fixed += formatted
+        print(f"  {_CYAN}Formatted {formatted} file(s).{_RESET}")
+
+    # Step 3: re-check to count remaining unfixable issues
+    recheck_cmd = tool.split() + ["check", "--output-format=concise"] + files
+    recheck = subprocess.run(recheck_cmd, capture_output=True, text=True)
+    if recheck.returncode != 0:
+        remaining_lines = [l for l in recheck.stdout.strip().splitlines() if l.strip() and ":" in l]
+        remaining = len(remaining_lines)
+        if remaining:
+            print(f"\n  {_YELLOW}Remaining issues ({remaining}):{_RESET}")
+            for line in remaining_lines[:20]:
+                print(f"    {line}")
+            if remaining > 20:
+                print(f"    ... and {remaining - 20} more")
+
+    return (fixed, remaining)
+
+
+def _autofix_js(files: List[str], project_root: str, framework: Optional[str]) -> tuple:
+    """Run eslint --fix on JS/TS files.
+
+    Returns:
+        (fixed_count, remaining_count)
+    """
+    _ensure_eslint(project_root, framework)
+
+    abs_files = [
+        str(Path(f) if Path(f).is_absolute() else Path(project_root) / f)
+        for f in files
+    ]
+
+    groups: dict = {}
+    for f in abs_files:
+        config_root = _find_eslint_config_root(f, project_root)
+        if config_root:
+            groups.setdefault(config_root, []).append(f)
+
+    if not groups:
+        return (0, 0)
+
+    print(f"\n{_CYAN}{_BOLD}── JavaScript Autofix (ESLint) {'─' * 37}{_RESET}")
+
+    total_fixed = 0
+    total_remaining = 0
+
+    for config_root, group_files in groups.items():
+        eslint_bin = _find_eslint(config_root)
+        if eslint_bin is None:
+            continue
+
+        cmd = eslint_bin.split() if " " in eslint_bin else [eslint_bin]
+        cmd += ["--fix", "--format=stylish"] + group_files
+
+        print(f"  Running: eslint --fix on {len(group_files)} file(s)...")
+        result = subprocess.run(cmd, cwd=config_root, capture_output=True, text=True)
+
+        if result.stdout.strip():
+            print(result.stdout.strip())
+
+        # Re-check for remaining
+        recheck_cmd = (eslint_bin.split() if " " in eslint_bin else [eslint_bin]) + ["--format=compact"] + group_files
+        recheck = subprocess.run(recheck_cmd, cwd=config_root, capture_output=True, text=True)
+        if recheck.returncode != 0:
+            remaining_lines = [l for l in recheck.stdout.strip().splitlines() if l.strip() and ":" in l]
+            total_remaining += len(remaining_lines)
+
+    return (total_fixed, total_remaining)
 
 
 # ── Shared ────────────────────────────────────────────────────────────────────
