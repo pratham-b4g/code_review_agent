@@ -199,6 +199,40 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         pass
 
 
+def _kill_port(port: int) -> None:
+    """Kill any existing process listening on the given port (prevents zombie servers)."""
+    import subprocess
+    import platform
+    try:
+        if platform.system() == "Windows":
+            # Find PIDs listening on the port
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.splitlines():
+                if f"127.0.0.1:{port}" in line and "LISTENING" in line:
+                    parts = line.split()
+                    pid = parts[-1]
+                    # Don't kill our own process
+                    if pid != str(os.getpid()):
+                        subprocess.run(["taskkill", "/PID", pid, "/F"],
+                                       capture_output=True, timeout=5)
+                        print(f"  Stopped old dashboard (PID {pid}) on port {port}")
+        else:
+            # Unix: use lsof
+            result = subprocess.run(
+                ["lsof", "-ti", f":{port}"],
+                capture_output=True, text=True, timeout=5
+            )
+            for pid in result.stdout.strip().split():
+                if pid and pid != str(os.getpid()):
+                    subprocess.run(["kill", "-9", pid], capture_output=True, timeout=5)
+                    print(f"  Stopped old dashboard (PID {pid}) on port {port}")
+    except Exception:
+        pass  # best-effort — don't let this block startup
+
+
 def run_dashboard(project_dir: str, port: int = 9090,
                   language: Optional[str] = None,
                   framework: Optional[str] = None,
@@ -222,18 +256,11 @@ def run_dashboard(project_dir: str, port: int = 9090,
     total = result["summary"]["total"]
 
     print(f"  Found {total} issue(s): {errs} error(s), {warns} warning(s), {infos} info(s)")
-    # Try to bind to the port, auto-increment if in use
-    server = None
-    for attempt_port in range(port, port + 10):
-        try:
-            server = HTTPServer(("127.0.0.1", attempt_port), DashboardHandler)
-            port = attempt_port
-            break
-        except OSError as e:
-            if attempt_port == port + 9:
-                print(f"  [ERROR] Could not find an available port ({port}-{attempt_port}).")
-                return 2
-            continue
+
+    # Kill any existing dashboard process on the target port
+    _kill_port(port)
+
+    server = HTTPServer(("127.0.0.1", port), DashboardHandler)
 
     print(f"\n  Starting dashboard on http://localhost:{port}")
     print(f"  Press Ctrl+C to stop.\n")
