@@ -202,6 +202,10 @@ def _ensure_unused_imports_plugin(project_root: str) -> None:
     """
     plugin_path = Path(project_root) / "node_modules" / "eslint-plugin-unused-imports"
     if plugin_path.exists():
+        # Plugin installed, but ensure ESLint config exists and has the rules
+        if not _has_eslint_config(project_root):
+            _create_eslint_config(project_root, framework=None)
+            print(f"{_CYAN}[LINT] Created .eslintrc.json with unused-imports rules.{_RESET}")
         return  # Already installed
 
     pkg_json = Path(project_root) / "package.json"
@@ -224,8 +228,12 @@ def _ensure_unused_imports_plugin(project_root: str) -> None:
         return
     print(f"{_CYAN}[LINT] eslint-plugin-unused-imports installed.{_RESET}")
 
-    # Patch existing eslint config to add the plugin rules
-    _patch_eslint_config_with_unused_imports(project_root)
+    # Patch existing eslint config or create one if none exists
+    if _has_eslint_config(project_root):
+        _patch_eslint_config_with_unused_imports(project_root)
+    else:
+        _create_eslint_config(project_root, framework=None)
+        print(f"{_CYAN}[LINT] Created .eslintrc.json with unused-imports rules (no config existed).{_RESET}")
 
 
 def _patch_eslint_config_with_unused_imports(project_root: str) -> None:
