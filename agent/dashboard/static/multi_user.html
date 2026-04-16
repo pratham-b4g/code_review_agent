@@ -799,14 +799,22 @@
       // Load available users for assignment
       let tls = [];
       let devs = [];
+      let usersError = '';
+      
       try {
         const res = await fetch('/api/users');
-        const users = await res.json();
-        if (users && Array.isArray(users)) {
-          tls = users.filter(u => u.role === 'admin');
-          devs = users.filter(u => u.role === 'developer');
+        const data = await res.json();
+        
+        // Check if response is array (success) or object with error
+        if (Array.isArray(data)) {
+          tls = data.filter(u => u.role === 'admin');
+          devs = data.filter(u => u.role === 'developer');
+        } else if (data.error) {
+          usersError = data.error;
+          console.error('API Error:', data.error);
         }
       } catch (e) {
+        usersError = 'Failed to load users';
         console.error('Failed to load users:', e);
       }
 
@@ -831,11 +839,14 @@
             <input type="text" id="newProjectBranch" class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-accent-blue" placeholder="main" value="main" />
           </div>
           
+          <!-- Error message if users failed to load -->
+          ${usersError ? `<div class="mb-4 p-3 bg-accent-red/20 border border-accent-red rounded-lg text-accent-red text-sm">${usersError}<br>Add users first before assigning to projects.</div>` : ''}
+          
           <!-- Assign TLs -->
           <div class="mb-4">
             <label class="block text-sm font-medium text-gray-400 mb-2">Assign TLs (Optional)</label>
-            <select id="newProjectTLs" multiple class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-accent-blue min-h-[80px]">
-              ${tls.map(tl => `<option value="${tl.email}">${tl.name} (${tl.email})</option>`).join('')}
+            <select id="newProjectTLs" multiple class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-accent-blue min-h-[80px]" ${tls.length === 0 ? 'disabled' : ''}>
+              ${tls.length > 0 ? tls.map(tl => `<option value="${tl.email}">${tl.name} (${tl.email})</option>`).join('') : '<option value="">No TLs available - add users first</option>'}
             </select>
             <p class="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple TLs</p>
           </div>
@@ -843,8 +854,8 @@
           <!-- Assign Devs -->
           <div class="mb-6">
             <label class="block text-sm font-medium text-gray-400 mb-2">Assign Developers (Optional)</label>
-            <select id="newProjectDevs" multiple class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-accent-blue min-h-[100px]">
-              ${devs.map(dev => `<option value="${dev.email}">${dev.name} (${dev.email})</option>`).join('')}
+            <select id="newProjectDevs" multiple class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-accent-blue min-h-[100px]" ${devs.length === 0 ? 'disabled' : ''}>
+              ${devs.length > 0 ? devs.map(dev => `<option value="${dev.email}">${dev.name} (${dev.email})</option>`).join('') : '<option value="">No developers available - add users first</option>'}
             </select>
             <p class="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple developers</p>
           </div>
