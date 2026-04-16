@@ -426,7 +426,8 @@
     // ── Projects View (Super Admin) ──────────────────────────────
     async function loadProjectsView(panel) {
       try {
-        const res = await fetch('/api/projects');
+        // Add cache-busting timestamp to prevent browser caching
+        const res = await fetch(`/api/projects?t=${Date.now()}`);
         const projects = await res.json();
 
         panel.innerHTML = `
@@ -463,7 +464,8 @@
     // ── Users View (Super Admin) ─────────────────────────────────
     async function loadUsersView(panel) {
       try {
-        const res = await fetch('/api/users');
+        // Add cache-busting timestamp to prevent browser caching
+        const res = await fetch(`/api/users?t=${Date.now()}`);
         const users = await res.json();
 
         panel.innerHTML = `
@@ -504,7 +506,9 @@
     // ── Access Requests View ─────────────────────────────────────
     async function loadAccessRequestsView(panel) {
       try {
-        const url = currentRole === 'super_admin' ? '/api/access-requests' : `/api/access-requests?tl_email=${currentUser.email}`;
+        const baseUrl = currentRole === 'super_admin' ? '/api/access-requests' : `/api/access-requests?tl_email=${currentUser.email}`;
+        // Add cache-busting timestamp to prevent browser caching
+        const url = baseUrl.includes('?') ? `${baseUrl}&t=${Date.now()}` : `${baseUrl}?t=${Date.now()}`;
         const res = await fetch(url);
         const requests = await res.json();
 
@@ -687,7 +691,8 @@
     // ── My Projects View ─────────────────────────────────────────
     async function loadMyProjectsView(panel) {
       try {
-        const res = await fetch('/api/my-projects');
+        // Add cache-busting timestamp to prevent browser caching
+        const res = await fetch(`/api/my-projects?t=${Date.now()}`);
         const projects = await res.json();
 
         panel.innerHTML = `
@@ -731,6 +736,157 @@
           <p class="text-gray-500">System settings coming soon...</p>
         </div>
       `;
+    }
+
+    // ── View Project Details ────────────────────────────────────
+    async function viewProject(projectId) {
+      try {
+        const res = await fetch('/api/projects');
+        const projects = await res.json();
+        const project = projects.find(p => p.id === projectId);
+        
+        if (!project) {
+          showNotification('Project not found', 'error');
+          return;
+        }
+        
+        // Get assigned users for this project
+        const assignmentsRes = await fetch('/api/my-projects');
+        const allAssignments = await assignmentsRes.json();
+        const projectAssignments = allAssignments.filter(a => a.id === projectId);
+        
+        const modal = document.createElement('div');
+        modal.id = 'viewProjectModal';
+        modal.className = 'fixed inset-0 z-50 flex items-center justify-center modal-overlay';
+        modal.innerHTML = `
+          <div class="bg-bg-card border border-gray-700 rounded-xl shadow-2xl w-full max-w-lg p-6">
+            <h3 class="text-xl font-bold text-white mb-4">${project.name}</h3>
+            <div class="space-y-3 mb-6">
+              <div>
+                <label class="text-sm text-gray-500">Path</label>
+                <p class="text-white mono text-sm">${project.path}</p>
+              </div>
+              <div>
+                <label class="text-sm text-gray-500">Main Branch</label>
+                <p class="text-white">${project.main_branch}</p>
+              </div>
+              <div>
+                <label class="text-sm text-gray-500">Created</label>
+                <p class="text-white text-sm">${new Date(project.created_at).toLocaleString()}</p>
+              </div>
+            </div>
+            <button onclick="document.getElementById('viewProjectModal').remove()" class="w-full bg-gray-700 text-white font-semibold py-3 rounded-lg hover:bg-gray-600 transition">
+              Close
+            </button>
+          </div>
+        `;
+        document.body.appendChild(modal);
+      } catch (e) {
+        showNotification('Error viewing project: ' + e.message, 'error');
+      }
+    }
+
+    // ── Assign Users to Project ─────────────────────────────────
+    async function assignUsers(projectId) {
+      try {
+        // Load all users
+        const usersRes = await fetch('/api/users');
+        const users = await usersRes.json();
+        
+        if (!users || users.length === 0) {
+          showNotification('No users available to assign. Add users first.', 'warning');
+          return;
+        }
+        
+        const tls = users.filter(u => u.role === 'admin');
+        const devs = users.filter(u => u.role === 'developer');
+        
+        const modal = document.createElement('div');
+        modal.id = 'assignUsersModal';
+        modal.className = 'fixed inset-0 z-50 flex items-center justify-center modal-overlay';
+        modal.innerHTML = `
+          <div class="bg-bg-card border border-gray-700 rounded-xl shadow-2xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+            <h3 class="text-xl font-bold text-white mb-4">Assign Users to Project</h3>
+            
+            <!-- TLs Multi-Select -->
+            <div class="mb-4">
+              <label class="block text-sm font-medium text-gray-400 mb-2">Assign TLs (${tls.length} available)</label>
+              <div class="bg-bg-dark border border-gray-700 rounded-lg p-2 max-h-[150px] overflow-y-auto">
+                ${tls.length === 0 ? '<p class="text-gray-500 text-sm p-2">No TLs available</p>' : 
+                  tls.map(tl => `
+                    <label class="flex items-center gap-2 p-2 hover:bg-bg-card rounded cursor-pointer">
+                      <input type="checkbox" name="assignTL" value="${tl.email}" class="w-4 h-4 rounded border-gray-600 bg-bg-dark text-accent-blue focus:ring-accent-blue">
+                      <span class="text-white text-sm">${tl.name}</span>
+                      <span class="text-gray-500 text-xs mono">${tl.email}</span>
+                    </label>
+                  `).join('')}
+              </div>
+            </div>
+            
+            <!-- Developers Multi-Select -->
+            <div class="mb-6">
+              <label class="block text-sm font-medium text-gray-400 mb-2">Assign Developers (${devs.length} available)</label>
+              <div class="bg-bg-dark border border-gray-700 rounded-lg p-2 max-h-[200px] overflow-y-auto">
+                ${devs.length === 0 ? '<p class="text-gray-500 text-sm p-2">No developers available</p>' : 
+                  devs.map(dev => `
+                    <label class="flex items-center gap-2 p-2 hover:bg-bg-card rounded cursor-pointer">
+                      <input type="checkbox" name="assignDev" value="${dev.email}" class="w-4 h-4 rounded border-gray-600 bg-bg-dark text-accent-blue focus:ring-accent-blue">
+                      <span class="text-white text-sm">${dev.name}</span>
+                      <span class="text-gray-500 text-xs mono">${dev.email}</span>
+                    </label>
+                  `).join('')}
+              </div>
+            </div>
+            
+            <div class="flex gap-3">
+              <button onclick="document.getElementById('assignUsersModal').remove()" class="flex-1 bg-gray-700 text-gray-300 font-semibold py-3 rounded-lg hover:bg-gray-600 transition">
+                Cancel
+              </button>
+              <button onclick="submitAssignUsers(${projectId})" class="flex-1 bg-accent-blue text-white font-semibold py-3 rounded-lg hover:bg-blue-600 transition">
+                Assign Selected
+              </button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(modal);
+      } catch (e) {
+        showNotification('Error loading users: ' + e.message, 'error');
+      }
+    }
+
+    async function submitAssignUsers(projectId) {
+      try {
+        // Get selected checkboxes
+        const selectedTLs = Array.from(document.querySelectorAll('input[name="assignTL"]:checked')).map(cb => cb.value);
+        const selectedDevs = Array.from(document.querySelectorAll('input[name="assignDev"]:checked')).map(cb => cb.value);
+        
+        let assigned = 0;
+        
+        // Assign TLs
+        for (const email of selectedTLs) {
+          const res = await fetch('/api/project-assignments', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project_id: projectId, user_email: email, role: 'admin' })
+          });
+          if (res.ok) assigned++;
+        }
+        
+        // Assign Devs
+        for (const email of selectedDevs) {
+          const res = await fetch('/api/project-assignments', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project_id: projectId, user_email: email, role: 'developer' })
+          });
+          if (res.ok) assigned++;
+        }
+        
+        showNotification(`${assigned} users assigned successfully`, 'success');
+        document.getElementById('assignUsersModal').remove();
+      } catch (e) {
+        showNotification('Error assigning users: ' + e.message, 'error');
+      }
     }
 
     // ── Open Project Review (Redirect to code review) ───────────
@@ -855,20 +1011,32 @@
           
           <!-- Assign TLs -->
           <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-400 mb-2">Assign TLs (Optional)</label>
-            <select id="newProjectTLs" multiple class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-accent-blue min-h-[80px]" ${tls.length === 0 ? 'disabled' : ''}>
-              ${tls.length > 0 ? tls.map(tl => `<option value="${tl.email}">${tl.name} (${tl.email})</option>`).join('') : '<option value="">No TLs available - add users first</option>'}
-            </select>
-            <p class="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple TLs</p>
+            <label class="block text-sm font-medium text-gray-400 mb-2">Assign TLs (${tls.length} available)</label>
+            <div class="bg-bg-dark border border-gray-700 rounded-lg p-2 max-h-[120px] overflow-y-auto ${tls.length === 0 ? 'opacity-50' : ''}">
+              ${tls.length === 0 ? '<p class="text-gray-500 text-sm p-2">No TLs available - add users first</p>' : 
+                tls.map(tl => `
+                  <label class="flex items-center gap-2 p-2 hover:bg-bg-card rounded cursor-pointer">
+                    <input type="checkbox" name="newProjectTL" value="${tl.email}" class="w-4 h-4 rounded border-gray-600 bg-bg-dark text-accent-blue focus:ring-accent-blue">
+                    <span class="text-white text-sm">${tl.name}</span>
+                    <span class="text-gray-500 text-xs mono">${tl.email}</span>
+                  </label>
+                `).join('')}
+            </div>
           </div>
           
           <!-- Assign Devs -->
           <div class="mb-6">
-            <label class="block text-sm font-medium text-gray-400 mb-2">Assign Developers (Optional)</label>
-            <select id="newProjectDevs" multiple class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-accent-blue min-h-[100px]" ${devs.length === 0 ? 'disabled' : ''}>
-              ${devs.length > 0 ? devs.map(dev => `<option value="${dev.email}">${dev.name} (${dev.email})</option>`).join('') : '<option value="">No developers available - add users first</option>'}
-            </select>
-            <p class="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple developers</p>
+            <label class="block text-sm font-medium text-gray-400 mb-2">Assign Developers (${devs.length} available)</label>
+            <div class="bg-bg-dark border border-gray-700 rounded-lg p-2 max-h-[150px] overflow-y-auto ${devs.length === 0 ? 'opacity-50' : ''}">
+              ${devs.length === 0 ? '<p class="text-gray-500 text-sm p-2">No developers available - add users first</p>' : 
+                devs.map(dev => `
+                  <label class="flex items-center gap-2 p-2 hover:bg-bg-card rounded cursor-pointer">
+                    <input type="checkbox" name="newProjectDev" value="${dev.email}" class="w-4 h-4 rounded border-gray-600 bg-bg-dark text-accent-blue focus:ring-accent-blue">
+                    <span class="text-white text-sm">${dev.name}</span>
+                    <span class="text-gray-500 text-xs mono">${dev.email}</span>
+                  </label>
+                `).join('')}
+            </div>
           </div>
           
           <div class="flex gap-3">
@@ -889,11 +1057,9 @@
       const path = document.getElementById('newProjectPath').value;
       const mainBranch = document.getElementById('newProjectBranch').value;
       
-      // Get selected TLs and Devs
-      const tlSelect = document.getElementById('newProjectTLs');
-      const devSelect = document.getElementById('newProjectDevs');
-      const selectedTLs = Array.from(tlSelect.selectedOptions).map(o => o.value);
-      const selectedDevs = Array.from(devSelect.selectedOptions).map(o => o.value);
+      // Get selected TLs and Devs from checkboxes
+      const selectedTLs = Array.from(document.querySelectorAll('input[name="newProjectTL"]:checked')).map(cb => cb.value);
+      const selectedDevs = Array.from(document.querySelectorAll('input[name="newProjectDev"]:checked')).map(cb => cb.value);
 
       if (!name || !path) {
         showNotification('Please fill all required fields', 'warning');
