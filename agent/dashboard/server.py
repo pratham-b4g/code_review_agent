@@ -284,6 +284,35 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
+        # Get project assignments (for super admin and TLs)
+        if path.startswith("/api/projects/") and path.endswith("/assignments"):
+            try:
+                project_id = int(path.split("/")[3])
+                db = _get_db()
+                assignments = db.get_project_assignments(project_id)
+                self._json_response(assignments)
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Get user's project assignments
+        if path == "/api/user-project-assignments":
+            qs = parse_qs(parsed.query)
+            user_email = qs.get("user_email", [None])[0]
+            if not user_email:
+                self._json_response({"error": "user_email required"}, 400)
+                return
+            try:
+                db = _get_db()
+                # Get projects assigned to this user
+                projects = db.get_user_projects(user_email)
+                # Return as assignment objects
+                assignments = [{"project_id": p["id"], "user_email": user_email, "role_on_project": p.get("role_on_project", "developer")} for p in projects]
+                self._json_response(assignments)
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
         # Get access requests
         if path == "/api/access-requests":
             qs = parse_qs(parsed.query)
@@ -578,11 +607,38 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         self._json_response({"error": "Not found"}, 404)
 
+    def do_DELETE(self):
+        """Handle DELETE requests."""
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        # Remove user from project assignment
+        if path.startswith("/api/project-assignments/"):
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            try:
+                # Parse project_id and user_email from URL: /api/project-assignments/{project_id}/{user_email}
+                parts = path.split("/")
+                if len(parts) >= 5:
+                    project_id = int(parts[4])
+                    user_email = parts[5] if len(parts) > 5 else ""
+                    db = _get_db()
+                    success = db.remove_user_from_project(project_id, user_email)
+                    self._json_response({"success": success})
+                else:
+                    self._json_response({"error": "Invalid URL format"}, 400)
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        self._json_response({"error": "Not found"}, 404)
+
     def do_OPTIONS(self):
         """Handle CORS preflight requests."""
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 

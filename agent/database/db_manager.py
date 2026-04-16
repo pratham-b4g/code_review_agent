@@ -226,6 +226,23 @@ class DatabaseManager:
                 """, (user_email,))
                 return [dict(row) for row in cur.fetchall()]
 
+    def get_project_assignments(self, project_id: int) -> List[Dict[str, Any]]:
+        """Get all users assigned to a project."""
+        try:
+            with self.connect() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT pa.*, u.name, u.email, u.role as user_role
+                        FROM project_assignments pa
+                        JOIN users u ON pa.user_email = u.email
+                        WHERE pa.project_id = %s AND u.is_active = TRUE
+                        ORDER BY u.role, u.name
+                    """, (project_id,))
+                    return [dict(row) for row in cur.fetchall()]
+        except Exception as e:
+            print(f"[DB Error] get_project_assignments: {e}")
+            return []
+
     def assign_user_to_project(self, project_id: int, user_email: str, role: str, assigned_by: int) -> bool:
         """Assign a user to a project."""
         try:
@@ -240,6 +257,21 @@ class DatabaseManager:
                     conn.commit()
                     return True
         except Exception:
+            return False
+
+    def remove_user_from_project(self, project_id: int, user_email: str) -> bool:
+        """Remove a user from a project."""
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        DELETE FROM project_assignments
+                        WHERE project_id = %s AND user_email = %s
+                    """, (project_id, user_email))
+                    conn.commit()
+                    return cur.rowcount > 0
+        except Exception as e:
+            print(f"[DB Error] remove_user_from_project: {e}")
             return False
 
     def create_access_request(self, requester_email: str, requester_name: str, tl_email: str) -> bool:

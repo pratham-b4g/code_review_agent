@@ -483,6 +483,7 @@
                   <th class="px-4 py-3 text-sm font-medium text-gray-400">Email</th>
                   <th class="px-4 py-3 text-sm font-medium text-gray-400">Role</th>
                   <th class="px-4 py-3 text-sm font-medium text-gray-400">Status</th>
+                  <th class="px-4 py-3 text-sm font-medium text-gray-400">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -492,6 +493,11 @@
                     <td class="px-4 py-3 text-sm text-gray-400 mono">${u.email}</td>
                     <td class="px-4 py-3"><span class="severity-badge ${u.role === 'super_admin' ? 'bg-accent-purple/20 text-accent-purple' : u.role === 'admin' ? 'bg-accent-blue/20 text-accent-blue' : 'bg-gray-700 text-gray-300'}">${u.role}</span></td>
                     <td class="px-4 py-3"><span class="text-accent-green">${u.is_active ? 'Active' : 'Inactive'}</span></td>
+                    <td class="px-4 py-3">
+                      <button onclick="manageUserProjects('${u.email}', '${u.name}')" class="text-sm text-accent-blue hover:text-blue-400 transition">
+                        Manage Projects
+                      </button>
+                    </td>
                   </tr>
                 `).join('')}
               </tbody>
@@ -500,6 +506,111 @@
         `;
       } catch (e) {
         panel.innerHTML = `<div class="text-red-400">Error loading users: ${e.message}</div>`;
+      }
+    }
+
+    // ── Manage User Projects (from Users list) ───────────────────
+    async function manageUserProjects(userEmail, userName) {
+      try {
+        // Load all projects and user's current assignments
+        const [projectsRes, assignmentsRes] = await Promise.all([
+          fetch(`/api/projects?t=${Date.now()}`),
+          fetch(`/api/user-project-assignments?user_email=${userEmail}&t=${Date.now()}`)
+        ]);
+        
+        const projects = await projectsRes.json();
+        const userAssignments = await assignmentsRes.json();
+        
+        const assignedProjectIds = userAssignments.map(a => a.project_id);
+        
+        const modal = document.createElement('div');
+        modal.id = 'manageUserProjectsModal';
+        modal.className = 'fixed inset-0 z-50 flex items-center justify-center modal-overlay';
+        modal.innerHTML = `
+          <div class="bg-bg-card border border-gray-700 rounded-xl shadow-2xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+            <h3 class="text-xl font-bold text-white mb-2">Manage Projects for ${userName}</h3>
+            <p class="text-sm text-gray-500 mb-4">${userEmail}</p>
+            <p class="text-sm text-gray-400 mb-4">Checked projects are assigned. Uncheck to remove.</p>
+            
+            <div class="mb-6">
+              <label class="block text-sm font-medium text-gray-400 mb-2">Projects (${projects.length} total, ${assignedProjectIds.length} assigned)</label>
+              <div class="bg-bg-dark border border-gray-700 rounded-lg p-2 max-h-[300px] overflow-y-auto">
+                ${projects.length === 0 ? '<p class="text-gray-500 text-sm p-2">No projects available</p>' : 
+                  projects.map(p => {
+                    const isAssigned = assignedProjectIds.includes(p.id);
+                    return `
+                    <label class="flex items-center gap-2 p-2 hover:bg-bg-card rounded cursor-pointer ${isAssigned ? 'bg-accent-blue/10' : ''}">
+                      <input type="checkbox" name="userProject" value="${p.id}" ${isAssigned ? 'checked' : ''} data-was-assigned="${isAssigned}" class="w-4 h-4 rounded border-gray-600 bg-bg-dark text-accent-blue focus:ring-accent-blue">
+                      <div class="flex-1">
+                        <span class="text-white text-sm block">${p.name}</span>
+                        <span class="text-gray-500 text-xs mono">${p.path}</span>
+                      </div>
+                      ${isAssigned ? '<span class="text-xs text-accent-blue">✓ Assigned</span>' : ''}
+                    </label>
+                  `}).join('')}
+              </div>
+            </div>
+            
+            <div class="flex gap-3">
+              <button onclick="document.getElementById('manageUserProjectsModal').remove()" class="flex-1 bg-gray-700 text-gray-300 font-semibold py-3 rounded-lg hover:bg-gray-600 transition">
+                Cancel
+              </button>
+              <button onclick="submitUserProjectChanges('${userEmail}')" class="flex-1 bg-accent-blue text-white font-semibold py-3 rounded-lg hover:bg-blue-600 transition">
+                Save Changes
+              </button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(modal);
+      } catch (e) {
+        showNotification('Error loading projects: ' + e.message, 'error');
+      }
+    }
+
+    async function submitUserProjectChanges(userEmail) {
+      try {
+        const allCheckboxes = document.querySelectorAll('input[name="userProject"]');
+        const toAdd = [];
+        const toRemove = [];
+        
+        allCheckboxes.forEach(cb => {
+          const wasAssigned = cb.dataset.wasAssigned === 'true';
+          const isNowAssigned = cb.checked;
+          const projectId = parseInt(cb.value);
+          
+          if (!wasAssigned && isNowAssigned) toAdd.push(projectId);
+          if (wasAssigned && !isNowAssigned) toRemove.push(projectId);
+        });
+        
+        let added = 0, removed = 0;
+        
+        // Add new assignments (default to developer role)
+        for (const projectId of toAdd) {
+          const res = await fetch('/api/project-assignments', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project_id: projectId, user_email: userEmail, role: 'developer' })
+          });
+          if (res.ok) added++;
+        }
+        
+        // Remove unchecked assignments
+        for (const projectId of toRemove) {
+          const res = await fetch(`/api/project-assignments/${projectId}/${userEmail}`, {
+            method: 'DELETE'
+          });
+          if (res.ok) removed++;
+        }
+        
+        let msg = '';
+        if (added > 0) msg += `${added} added`;
+        if (removed > 0) msg += (msg ? ', ' : '') + `${removed} removed`;
+        if (!msg) msg = 'No changes made';
+        
+        showNotification(msg, 'success');
+        document.getElementById('manageUserProjectsModal').remove();
+      } catch (e) {
+        showNotification('Error saving changes: ' + e.message, 'error');
       }
     }
 
@@ -789,14 +900,22 @@
     // ── Assign Users to Project ─────────────────────────────────
     async function assignUsers(projectId) {
       try {
-        // Load all users
-        const usersRes = await fetch('/api/users');
+        // Load all users and current assignments in parallel
+        const [usersRes, assignmentsRes] = await Promise.all([
+          fetch(`/api/users?t=${Date.now()}`),
+          fetch(`/api/projects/${projectId}/assignments?t=${Date.now()}`)
+        ]);
+        
         const users = await usersRes.json();
+        const currentAssignments = await assignmentsRes.json();
         
         if (!users || users.length === 0) {
           showNotification('No users available to assign. Add users first.', 'warning');
           return;
         }
+        
+        // Get currently assigned emails
+        const assignedEmails = currentAssignments.map(a => a.email);
         
         const tls = users.filter(u => u.role === 'admin');
         const devs = users.filter(u => u.role === 'developer');
@@ -807,34 +926,41 @@
         modal.innerHTML = `
           <div class="bg-bg-card border border-gray-700 rounded-xl shadow-2xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
             <h3 class="text-xl font-bold text-white mb-4">Assign Users to Project</h3>
+            <p class="text-sm text-gray-500 mb-4">Checked users are currently assigned. Uncheck to remove.</p>
             
             <!-- TLs Multi-Select -->
             <div class="mb-4">
-              <label class="block text-sm font-medium text-gray-400 mb-2">Assign TLs (${tls.length} available)</label>
+              <label class="block text-sm font-medium text-gray-400 mb-2">TLs (${tls.length} total, ${tls.filter(u => assignedEmails.includes(u.email)).length} assigned)</label>
               <div class="bg-bg-dark border border-gray-700 rounded-lg p-2 max-h-[150px] overflow-y-auto">
                 ${tls.length === 0 ? '<p class="text-gray-500 text-sm p-2">No TLs available</p>' : 
-                  tls.map(tl => `
-                    <label class="flex items-center gap-2 p-2 hover:bg-bg-card rounded cursor-pointer">
-                      <input type="checkbox" name="assignTL" value="${tl.email}" class="w-4 h-4 rounded border-gray-600 bg-bg-dark text-accent-blue focus:ring-accent-blue">
+                  tls.map(tl => {
+                    const isAssigned = assignedEmails.includes(tl.email);
+                    return `
+                    <label class="flex items-center gap-2 p-2 hover:bg-bg-card rounded cursor-pointer ${isAssigned ? 'bg-accent-blue/10' : ''}">
+                      <input type="checkbox" name="assignTL" value="${tl.email}" ${isAssigned ? 'checked' : ''} data-was-assigned="${isAssigned}" class="w-4 h-4 rounded border-gray-600 bg-bg-dark text-accent-blue focus:ring-accent-blue">
                       <span class="text-white text-sm">${tl.name}</span>
                       <span class="text-gray-500 text-xs mono">${tl.email}</span>
+                      ${isAssigned ? '<span class="ml-auto text-xs text-accent-blue">✓ Assigned</span>' : ''}
                     </label>
-                  `).join('')}
+                  `}).join('')}
               </div>
             </div>
             
             <!-- Developers Multi-Select -->
             <div class="mb-6">
-              <label class="block text-sm font-medium text-gray-400 mb-2">Assign Developers (${devs.length} available)</label>
+              <label class="block text-sm font-medium text-gray-400 mb-2">Developers (${devs.length} total, ${devs.filter(u => assignedEmails.includes(u.email)).length} assigned)</label>
               <div class="bg-bg-dark border border-gray-700 rounded-lg p-2 max-h-[200px] overflow-y-auto">
                 ${devs.length === 0 ? '<p class="text-gray-500 text-sm p-2">No developers available</p>' : 
-                  devs.map(dev => `
-                    <label class="flex items-center gap-2 p-2 hover:bg-bg-card rounded cursor-pointer">
-                      <input type="checkbox" name="assignDev" value="${dev.email}" class="w-4 h-4 rounded border-gray-600 bg-bg-dark text-accent-blue focus:ring-accent-blue">
+                  devs.map(dev => {
+                    const isAssigned = assignedEmails.includes(dev.email);
+                    return `
+                    <label class="flex items-center gap-2 p-2 hover:bg-bg-card rounded cursor-pointer ${isAssigned ? 'bg-accent-blue/10' : ''}">
+                      <input type="checkbox" name="assignDev" value="${dev.email}" ${isAssigned ? 'checked' : ''} data-was-assigned="${isAssigned}" class="w-4 h-4 rounded border-gray-600 bg-bg-dark text-accent-blue focus:ring-accent-blue">
                       <span class="text-white text-sm">${dev.name}</span>
                       <span class="text-gray-500 text-xs mono">${dev.email}</span>
+                      ${isAssigned ? '<span class="ml-auto text-xs text-accent-blue">✓ Assigned</span>' : ''}
                     </label>
-                  `).join('')}
+                  `}).join('')}
               </div>
             </div>
             
@@ -843,7 +969,7 @@
                 Cancel
               </button>
               <button onclick="submitAssignUsers(${projectId})" class="flex-1 bg-accent-blue text-white font-semibold py-3 rounded-lg hover:bg-blue-600 transition">
-                Assign Selected
+                Save Changes
               </button>
             </div>
           </div>
@@ -856,36 +982,57 @@
 
     async function submitAssignUsers(projectId) {
       try {
-        // Get selected checkboxes
-        const selectedTLs = Array.from(document.querySelectorAll('input[name="assignTL"]:checked')).map(cb => cb.value);
-        const selectedDevs = Array.from(document.querySelectorAll('input[name="assignDev"]:checked')).map(cb => cb.value);
+        // Get all checkboxes (both checked and unchecked)
+        const allTLCheckboxes = document.querySelectorAll('input[name="assignTL"]');
+        const allDevCheckboxes = document.querySelectorAll('input[name="assignDev"]');
         
-        let assigned = 0;
+        // Determine what changed
+        const toAdd = [];
+        const toRemove = [];
         
-        // Assign TLs
-        for (const email of selectedTLs) {
+        allTLCheckboxes.forEach(cb => {
+          const wasAssigned = cb.dataset.wasAssigned === 'true';
+          const isNowAssigned = cb.checked;
+          if (!wasAssigned && isNowAssigned) toAdd.push({ email: cb.value, role: 'admin' });
+          if (wasAssigned && !isNowAssigned) toRemove.push(cb.value);
+        });
+        
+        allDevCheckboxes.forEach(cb => {
+          const wasAssigned = cb.dataset.wasAssigned === 'true';
+          const isNowAssigned = cb.checked;
+          if (!wasAssigned && isNowAssigned) toAdd.push({ email: cb.value, role: 'developer' });
+          if (wasAssigned && !isNowAssigned) toRemove.push(cb.value);
+        });
+        
+        let added = 0, removed = 0;
+        
+        // Add new assignments
+        for (const user of toAdd) {
           const res = await fetch('/api/project-assignments', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ project_id: projectId, user_email: email, role: 'admin' })
+            body: JSON.stringify({ project_id: projectId, user_email: user.email, role: user.role })
           });
-          if (res.ok) assigned++;
+          if (res.ok) added++;
         }
         
-        // Assign Devs
-        for (const email of selectedDevs) {
-          const res = await fetch('/api/project-assignments', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ project_id: projectId, user_email: email, role: 'developer' })
+        // Remove unchecked assignments
+        for (const email of toRemove) {
+          const res = await fetch(`/api/project-assignments/${projectId}/${email}`, {
+            method: 'DELETE'
           });
-          if (res.ok) assigned++;
+          if (res.ok) removed++;
         }
         
-        showNotification(`${assigned} users assigned successfully`, 'success');
+        let msg = '';
+        if (added > 0) msg += `${added} added`;
+        if (removed > 0) msg += (msg ? ', ' : '') + `${removed} removed`;
+        if (!msg) msg = 'No changes made';
+        
+        showNotification(msg, 'success');
         document.getElementById('assignUsersModal').remove();
       } catch (e) {
-        showNotification('Error assigning users: ' + e.message, 'error');
+        showNotification('Error saving assignments: ' + e.message, 'error');
       }
     }
 
