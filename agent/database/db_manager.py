@@ -368,6 +368,7 @@ class DatabaseManager:
                     effort_score = metrics.get('effort_score', None)
 
                     # Insert or update (upsert) - now includes branch
+                    # For scans (commits_count=0), replace the daily value instead of accumulating
                     cur.execute("""
                         INSERT INTO developer_analytics
                         (user_email, project_id, branch, date, commits_count, lines_added, lines_removed,
@@ -375,12 +376,22 @@ class DatabaseManager:
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (user_email, project_id, branch, date)
                         DO UPDATE SET
-                            commits_count = developer_analytics.commits_count + EXCLUDED.commits_count,
-                            lines_added = developer_analytics.lines_added + EXCLUDED.lines_added,
-                            lines_removed = developer_analytics.lines_removed + EXCLUDED.lines_removed,
-                            issues_found = developer_analytics.issues_found + EXCLUDED.issues_found,
+                            commits_count = CASE WHEN EXCLUDED.commits_count = 0 
+                                THEN developer_analytics.commits_count 
+                                ELSE developer_analytics.commits_count + EXCLUDED.commits_count END,
+                            lines_added = CASE WHEN EXCLUDED.commits_count = 0 
+                                THEN EXCLUDED.lines_added 
+                                ELSE developer_analytics.lines_added + EXCLUDED.lines_added END,
+                            lines_removed = CASE WHEN EXCLUDED.commits_count = 0 
+                                THEN EXCLUDED.lines_removed 
+                                ELSE developer_analytics.lines_removed + EXCLUDED.lines_removed END,
+                            issues_found = CASE WHEN EXCLUDED.commits_count = 0 
+                                THEN EXCLUDED.issues_found 
+                                ELSE developer_analytics.issues_found + EXCLUDED.issues_found END,
                             bugs_fixed = developer_analytics.bugs_fixed + EXCLUDED.bugs_fixed,
-                            files_changed = developer_analytics.files_changed + EXCLUDED.files_changed,
+                            files_changed = CASE WHEN EXCLUDED.commits_count = 0 
+                                THEN EXCLUDED.files_changed 
+                                ELSE developer_analytics.files_changed + EXCLUDED.files_changed END,
                             code_quality_score = EXCLUDED.code_quality_score,
                             effort_score = EXCLUDED.effort_score
                     """, (user_email, project_id, branch, date, commits, lines_added, lines_removed,

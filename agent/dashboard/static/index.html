@@ -76,16 +76,6 @@
               <div class="text-xs text-gray-500 mt-1">Info</div>
             </div>
           </div>
-          <!-- Duplication -->
-          <div class="mt-3 bg-bg-dark rounded-lg p-3 cursor-pointer hover:ring-1 hover:ring-accent-purple/50 transition" onclick="showDuplicationView()">
-            <div class="flex justify-between items-center">
-              <span class="text-xs text-gray-500">Code Duplication</span>
-              <span class="text-sm font-bold" id="dupPercent">0%</span>
-            </div>
-            <div class="mt-2 h-1.5 bg-gray-800 rounded-full overflow-hidden">
-              <div class="h-full bg-accent-green rounded-full transition-all" id="dupBar" style="width:0%"></div>
-            </div>
-          </div>
         </div>
 
         <!-- Filters -->
@@ -454,75 +444,6 @@
       if (currentFile) selectFile(currentFile);
     }
 
-    // ── Duplication detail view ──────────────────────────────────
-    function showDuplicationView() {
-      if (!DATA) return;
-      const dup = DATA.duplication || {};
-
-      // Hide other views, show dup view
-      document.getElementById('welcomeScreen').classList.add('hidden');
-      document.getElementById('codeView').classList.add('hidden');
-      document.getElementById('dupView').classList.remove('hidden');
-      document.getElementById('fileHeader').style.display = 'none';
-      currentFile = null;
-      renderFileList();
-
-      // Fill stats
-      document.getElementById('dupPctLarge').textContent = (dup.percentage || 0) + '%';
-      document.getElementById('dupLinesCount').textContent = dup.duplicated_lines || 0;
-      document.getElementById('dupTotalLines').textContent = dup.total_lines || 0;
-
-      // Collect duplication violations (CROSS001 = code blocks, CROSS003 = constants)
-      const dupViolations = (DATA.violations || []).filter(v =>
-        v.category === 'duplication' || v.rule_id === 'CROSS001' || v.rule_id === 'CROSS003'
-      );
-
-      const container = document.getElementById('dupFileList');
-      if (dupViolations.length === 0) {
-        container.innerHTML = `
-          <div class="text-center py-8">
-            <div class="text-accent-green text-3xl mb-2">&#10003;</div>
-            <div class="text-sm text-gray-400">No duplication issues found</div>
-          </div>`;
-        return;
-      }
-
-      const projectBase = (DATA.project || '').replace(/\\/g, '/');
-
-      container.innerHTML = dupViolations.map(v => {
-        const shortPath = (v.file_path || '').replace(/\\/g, '/').replace(projectBase + '/', '').replace(projectBase, '');
-        const colors = { error: 'red', warning: 'yellow', info: 'blue' };
-        const c = colors[v.severity] || 'purple';
-        const ruleLabel = v.rule_id === 'CROSS001' ? 'Duplicate Code Block' :
-                          v.rule_id === 'CROSS003' ? 'Duplicate Constant' :
-                          v.rule_id === 'DUP_GATE' ? 'Duplication Threshold' : 'Duplication';
-        return `
-          <div class="bg-bg-card border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition cursor-pointer fade-in"
-               onclick="selectFile('${(v.file_path || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')">
-            <div class="flex items-start justify-between gap-3">
-              <div class="min-w-0 flex-1">
-                <div class="flex items-center gap-2 mb-1">
-                  <span class="severity-badge bg-accent-${c}/20 text-accent-${c}">${ruleLabel}</span>
-                  <span class="text-xs text-gray-500 mono">L${v.line_number}</span>
-                </div>
-                <div class="text-sm text-white mono truncate">${shortPath}</div>
-                <div class="text-xs text-gray-400 mt-1">${escapeHtml(v.message)}</div>
-                ${v.fix_suggestion ? `<div class="text-xs text-gray-600 mt-1">Fix: ${escapeHtml(v.fix_suggestion)}</div>` : ''}
-              </div>
-            </div>
-          </div>`;
-      }).join('');
-    }
-
-    function closeDupView() {
-      document.getElementById('dupView').classList.add('hidden');
-      if (currentFile) {
-        document.getElementById('codeView').classList.remove('hidden');
-        document.getElementById('fileHeader').style.display = 'flex';
-      } else {
-        document.getElementById('welcomeScreen').classList.remove('hidden');
-      }
-    }
 
     // ── Event Handlers ────────────────────────────────────────────
     document.querySelectorAll('.filter-btn').forEach(btn => {
@@ -534,8 +455,6 @@
         btn.classList.add('active', 'bg-gray-700/50', 'text-white');
         btn.classList.remove('bg-gray-800', 'text-gray-400');
         currentFilter = btn.dataset.filter;
-        // Hide dup view if open
-        document.getElementById('dupView').classList.add('hidden');
         if (currentFile) {
           document.getElementById('codeView').classList.remove('hidden');
         } else {

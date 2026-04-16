@@ -1174,6 +1174,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             violations = []
             for v in result.violations:
                 rel_file = make_relative(v.file_path)
+                # Check if this file is in our file list
+                file_exists = any(f['path'] == rel_file for f in file_list)
+                if not file_exists:
+                    print(f"[Scan] Warning: Violation file not in file list: {rel_file} (original: {v.file_path})")
                 violations.append({
                     "file": rel_file,
                     "line": v.line_number,
