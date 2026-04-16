@@ -1391,7 +1391,7 @@
                     <div class="text-xs text-gray-500">Info</div>
                   </div>
                   <div class="bg-bg-dark rounded p-2 text-center cursor-pointer hover:ring-1 hover:ring-accent-purple/50" onclick="showDuplicationView()">
-                    <div class="text-xl font-bold text-accent-purple">${currentReviewData.violations.filter(v => v.category === 'duplication' || v.rule_id === 'CROSS001' || v.rule_id === 'CROSS003').length}</div>
+                    <div class="text-xl font-bold text-accent-purple">${(currentReviewData.duplication || {}).percentage || 0}%</div>
                     <div class="text-xs text-gray-500">Duplication</div>
                   </div>
                 </div>
@@ -1415,6 +1415,18 @@
                 <div class="flex items-center justify-between mb-2">
                   <h3 class="text-sm font-semibold text-white">Duplication Issues</h3>
                   <button onclick="hideDuplicationView()" class="text-xs text-gray-400 hover:text-white">Back to Files</button>
+                </div>
+                <!-- Duplication Stats -->
+                <div class="mb-3 p-3 bg-bg-dark rounded-lg">
+                  <div class="flex items-center gap-2 mb-1">
+                    <span class="text-lg">📊</span>
+                    <span class="text-sm font-semibold text-white">Code Duplication</span>
+                  </div>
+                  <div class="text-xs text-gray-400">
+                    <span id="dupPercentage">${(currentReviewData.duplication || {}).percentage || 0}%</span> 
+                    (<span id="dupLines">${(currentReviewData.duplication || {}).duplicated_lines || 0}</span> duplicated lines / 
+                    <span id="dupTotal">${(currentReviewData.duplication || {}).total_lines || 0}</span> total lines)
+                  </div>
                 </div>
                 <div id="duplicationList"></div>
               </div>
@@ -1681,6 +1693,12 @@
     function showDuplicationView() {
       document.getElementById('fileTree').classList.add('hidden');
       document.getElementById('duplicationView').classList.remove('hidden');
+      
+      // Update stats
+      const dup = currentReviewData.duplication || {};
+      document.getElementById('dupPercentage').textContent = (dup.percentage || 0).toFixed(1) + '%';
+      document.getElementById('dupLines').textContent = dup.duplicated_lines || 0;
+      document.getElementById('dupTotal').textContent = dup.total_lines || 0;
       
       const dupViolations = currentReviewData.violations.filter(v => 
         v.category === 'duplication' || v.rule_id === 'CROSS001' || v.rule_id === 'CROSS003'
