@@ -183,6 +183,39 @@ Examples:
   cra dashboard --dir /path/to/project
   cra dashboard --port 8080
 """.strip(),
+
+    "admin": """
+Usage: cra admin [OPTIONS]
+
+Launch the Super Admin panel for managing TLs, projects, and the system.
+Only accessible with Super Admin credentials.
+Opens http://localhost:9090 in your browser.
+
+Options:
+  --port PORT       Server port (default: 9090)
+  --no-open         Don't auto-open the browser
+
+Examples:
+  cra admin
+  cra admin --port 8080
+""".strip(),
+
+    "send-reports": """
+Usage: cra send-reports [OPTIONS]
+
+Send daily analytics reports to all TLs via email.
+This command is designed to run as a cron job.
+
+Options:
+  --days DAYS       Number of days to include in report (default: 1)
+
+Examples:
+  cra send-reports              # Send yesterday's report
+  cra send-reports --days 7     # Send weekly report
+
+Cron setup:
+  0 9 * * * cra send-reports    # Run daily at 9 AM
+""".strip(),
 }
 
 
@@ -202,6 +235,8 @@ Usage:
   python main.py baseline save [--dir PATH]
   python main.py report   [--dir PATH] [--lang LANG]
   python main.py dashboard [--dir PATH] [--port PORT]
+  python main.py admin    [--port PORT]
+  python main.py send-reports [--days DAYS]
 
 Options:
   --staged          Review only git-staged files (pre-commit mode)
@@ -514,7 +549,24 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
 
         project_dir = project_dir or os.getcwd()
         return run_dashboard(project_dir, port=port, language=language,
-                             framework=framework, no_open=no_open)
+                             framework=framework, no_open=no_open, mode='developer')
+
+    # ── admin ───────────────────────────────────────────────────────────
+    elif command == "admin":
+        from agent.dashboard.server import run_dashboard
+
+        port = 9090
+        no_open = "--no-open" in args
+
+        for i, a in enumerate(args):
+            if a == "--port" and i + 1 < len(args):
+                try:
+                    port = int(args[i + 1])
+                except ValueError:
+                    print("[ERROR] --port must be a number")
+                    return 2
+
+        return run_dashboard(project_dir=None, port=port, no_open=no_open, mode='admin')
 
     # ── setup-key ────────────────────────────────────────────────────────
     elif command == "setup-key":
@@ -527,6 +579,68 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
         from agent.git.hook_installer import prompt_tl_setup
         prompt_tl_setup()
         return 0
+
+    # ── send-reports (cron job for daily analytics emails) ───────────────
+    elif command == "send-reports":
+        days = 1
+        for i, a in enumerate(args):
+            if a == "--days" and i + 1 < len(args):
+                try:
+                    days = int(args[i + 1])
+                except ValueError:
+                    print("[ERROR] --days must be a number")
+                    return 2
+
+        from agent.database import DatabaseManager
+        from agent.analytics import get_tracker
+        from agent.utils.email_notifier import get_notifier
+        from datetime import datetime, date, timedelta
+
+        print(f"[INFO] Sending {days}-day analytics reports to all TLs...")
+
+        try:
+            db = DatabaseManager()
+            tracker = get_tracker(db)
+            notifier = get_notifier()
+
+            # Get all TLs (admins)
+            tls = db.get_all_users(role='admin')
+            if not tls:
+                print("[WARN] No TLs found to send reports to")
+                return 0
+
+            # Calculate date range
+            end_date = date.today()
+            start_date = end_date - timedelta(days=days)
+            date_str = f"{start_date} to {end_date}" if days > 1 else str(end_date)
+
+            reports_sent = 0
+            for tl in tls:
+                # Get analytics for this TL's projects
+                summary = tracker.get_analytics_summary(days=days)
+
+                if summary.get('total_commits', 0) > 0 or summary.get('developers'):
+                    success = notifier.send_daily_analytics_report(
+                        tl_email=tl['email'],
+                        tl_name=tl['name'],
+                        date=date_str,
+                        summary=summary,
+                        developer_stats=summary.get('developers', [])
+                    )
+                    if success:
+                        reports_sent += 1
+                        print(f"  ✓ Sent report to {tl['email']}")
+                    else:
+                        print(f"  ✗ Failed to send report to {tl['email']}")
+                else:
+                    print(f"  - No activity to report for {tl['email']}")
+
+            print(f"[INFO] Sent {reports_sent} reports")
+            return 0
+
+        except Exception as e:
+            print(f"[ERROR] Failed to send reports: {e}")
+            return 1
 
     else:
         print(f"[ERROR] Unknown command '{command}'. Run with --help for usage.")

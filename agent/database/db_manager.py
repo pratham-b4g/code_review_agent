@@ -1,0 +1,394 @@
+"""PostgreSQL database manager for CRA multi-user system."""
+import os
+from datetime import datetime, date
+from typing import Optional, List, Dict, Any
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+# Default local PostgreSQL (user will change to cloud URL)
+DEFAULT_DB_URL = "postgresql://postgres:root@localhost:5432/cra"
+
+# Super Admin credentials (user will edit these)
+SUPER_ADMIN_EMAIL = "admin@example.com"
+SUPER_ADMIN_PASSWORD = "admin123"
+
+
+class DatabaseManager:
+    """Manages PostgreSQL connection and all database operations."""
+
+    def __init__(self, db_url: Optional[str] = None):
+        self.db_url = db_url or os.getenv("CRA_DATABASE_URL", DEFAULT_DB_URL)
+        self.conn = None
+
+    def connect(self):
+        """Establish database connection."""
+        if not self.conn or self.conn.closed:
+            self.conn = psycopg2.connect(self.db_url)
+        return self.conn
+
+    def init_schema(self):
+        """Create all required tables."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                # Users table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        id SERIAL PRIMARY KEY,
+                        email VARCHAR(255) UNIQUE NOT NULL,
+                        name VARCHAR(255) NOT NULL,
+                        role VARCHAR(50) NOT NULL CHECK (role IN ('super_admin', 'admin', 'developer')),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_by INTEGER REFERENCES users(id),
+                        is_active BOOLEAN DEFAULT TRUE
+                    )
+                """)
+
+                # Projects table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS projects (
+                        id SERIAL PRIMARY KEY,
+                        name VARCHAR(255) NOT NULL,
+                        path TEXT NOT NULL,
+                        main_branch VARCHAR(100) DEFAULT 'main',
+                        created_by INTEGER REFERENCES users(id),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        is_active BOOLEAN DEFAULT TRUE
+                    )
+                """)
+
+                # Project assignments (TLs and Developers assigned to projects)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS project_assignments (
+                        id SERIAL PRIMARY KEY,
+                        project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                        user_email VARCHAR(255) REFERENCES users(email),
+                        assigned_by INTEGER REFERENCES users(id),
+                        assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        role_on_project VARCHAR(50) CHECK (role_on_project IN ('tl', 'developer')),
+                        UNIQUE(project_id, user_email)
+                    )
+                """)
+
+                # Access requests (developers requesting access)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS access_requests (
+                        id SERIAL PRIMARY KEY,
+                        requester_email VARCHAR(255) NOT NULL,
+                        requester_name VARCHAR(255) NOT NULL,
+                        tl_email VARCHAR(255) NOT NULL,
+                        status VARCHAR(50) DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+                        requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        responded_at TIMESTAMP,
+                        responded_by INTEGER REFERENCES users(id),
+                        notes TEXT
+                    )
+                """)
+
+                # Analytics data (commits, issues, etc.)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS developer_analytics (
+                        id SERIAL PRIMARY KEY,
+                        user_email VARCHAR(255) REFERENCES users(email),
+                        project_id INTEGER REFERENCES projects(id),
+                        date DATE NOT NULL,
+                        commits_count INTEGER DEFAULT 0,
+                        lines_added INTEGER DEFAULT 0,
+                        lines_removed INTEGER DEFAULT 0,
+                        issues_found INTEGER DEFAULT 0,
+                        bugs_fixed INTEGER DEFAULT 0,
+                        files_changed INTEGER DEFAULT 0,
+                        code_quality_score DECIMAL(5,2),
+                        effort_score DECIMAL(5,2),
+                        UNIQUE(user_email, project_id, date)
+                    )
+                """)
+
+                # Email notifications log
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS email_notifications (
+                        id SERIAL PRIMARY KEY,
+                        recipient_email VARCHAR(255) NOT NULL,
+                        subject TEXT NOT NULL,
+                        body TEXT NOT NULL,
+                        notification_type VARCHAR(100),
+                        sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        status VARCHAR(50) DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed'))
+                    )
+                """)
+
+                conn.commit()
+
+    def is_first_run(self) -> bool:
+        """Check if database is empty (no users yet)."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM users")
+                return cur.fetchone()[0] == 0
+
+    def create_super_admin(self, email: str, name: str, password: str) -> bool:
+        """Create the first super admin."""
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO users (email, name, role, is_active)
+                        VALUES (%s, %s, 'super_admin', TRUE)
+                        ON CONFLICT (email) DO NOTHING
+                        RETURNING id
+                    """, (email, name))
+                    result = cur.fetchone()
+                    conn.commit()
+                    return result is not None
+        except Exception:
+            return False
+
+    def verify_super_admin(self, email: str, password: str) -> bool:
+        """Verify super admin credentials."""
+        # For now, check against static credentials
+        # In production, you'd hash and store in DB
+        return email == SUPER_ADMIN_EMAIL and password == SUPER_ADMIN_PASSWORD
+
+    def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        """Get user by email."""
+        with self.connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM users WHERE email = %s AND is_active = TRUE", (email,))
+                return dict(cur.fetchone()) if cur.fetchone() else None
+
+    def create_user(self, email: str, name: str, role: str, created_by: int) -> bool:
+        """Create a new user (TL or Developer)."""
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO users (email, name, role, created_by)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (email) DO NOTHING
+                    """, (email, name, role, created_by))
+                    conn.commit()
+                    return True
+        except Exception:
+            return False
+
+    def get_all_users(self, role: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all users, optionally filtered by role."""
+        with self.connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                if role:
+                    cur.execute("SELECT * FROM users WHERE role = %s ORDER BY created_at DESC", (role,))
+                else:
+                    cur.execute("SELECT * FROM users ORDER BY created_at DESC")
+                return [dict(row) for row in cur.fetchall()]
+
+    def create_project(self, name: str, path: str, main_branch: str, created_by: int) -> Optional[int]:
+        """Create a new project."""
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO projects (name, path, main_branch, created_by)
+                        VALUES (%s, %s, %s, %s)
+                        RETURNING id
+                    """, (name, path, main_branch, created_by))
+                    result = cur.fetchone()
+                    conn.commit()
+                    return result[0] if result else None
+        except Exception:
+            return None
+
+    def get_all_projects(self) -> List[Dict[str, Any]]:
+        """Get all projects."""
+        with self.connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM projects WHERE is_active = TRUE ORDER BY created_at DESC")
+                return [dict(row) for row in cur.fetchall()]
+
+    def get_user_projects(self, user_email: str) -> List[Dict[str, Any]]:
+        """Get projects assigned to a user."""
+        with self.connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT p.*, pa.role_on_project
+                    FROM projects p
+                    JOIN project_assignments pa ON p.id = pa.project_id
+                    WHERE pa.user_email = %s AND p.is_active = TRUE
+                    ORDER BY p.created_at DESC
+                """, (user_email,))
+                return [dict(row) for row in cur.fetchall()]
+
+    def assign_user_to_project(self, project_id: int, user_email: str, role: str, assigned_by: int) -> bool:
+        """Assign a user to a project."""
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO project_assignments (project_id, user_email, role_on_project, assigned_by)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (project_id, user_email) DO UPDATE
+                        SET role_on_project = EXCLUDED.role_on_project, assigned_at = CURRENT_TIMESTAMP
+                    """, (project_id, user_email, role, assigned_by))
+                    conn.commit()
+                    return True
+        except Exception:
+            return False
+
+    def create_access_request(self, requester_email: str, requester_name: str, tl_email: str) -> bool:
+        """Create an access request from developer."""
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO access_requests (requester_email, requester_name, tl_email)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT DO NOTHING
+                    """, (requester_email, requester_name, tl_email))
+                    conn.commit()
+                    return True
+        except Exception:
+            return False
+
+    def get_pending_access_requests(self, tl_email: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get pending access requests."""
+        with self.connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                if tl_email:
+                    cur.execute("""
+                        SELECT * FROM access_requests
+                        WHERE tl_email = %s AND status = 'pending'
+                        ORDER BY requested_at DESC
+                    """, (tl_email,))
+                else:
+                    cur.execute("""
+                        SELECT * FROM access_requests
+                        WHERE status = 'pending'
+                        ORDER BY requested_at DESC
+                    """)
+                return [dict(row) for row in cur.fetchall()]
+
+    def respond_to_access_request(self, request_id: int, status: str, responded_by: int, notes: str = "") -> bool:
+        """Approve or reject an access request."""
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE access_requests
+                        SET status = %s, responded_at = CURRENT_TIMESTAMP, responded_by = %s, notes = %s
+                        WHERE id = %s
+                        RETURNING requester_email
+                    """, (status, responded_by, notes, request_id))
+                    result = cur.fetchone()
+                    conn.commit()
+                    return result is not None
+        except Exception:
+            return False
+
+    def log_analytics(self, user_email: str, project_id: int, date: date, **metrics) -> bool:
+        """Log or update daily analytics for a developer."""
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    # Extract metrics with defaults
+                    commits = metrics.get('commits_count', 0)
+                    lines_added = metrics.get('lines_added', 0)
+                    lines_removed = metrics.get('lines_removed', 0)
+                    issues = metrics.get('issues_found', 0)
+                    bugs_fixed = metrics.get('bugs_fixed', 0)
+                    files_changed = metrics.get('files_changed', 0)
+                    quality_score = metrics.get('code_quality_score', None)
+                    effort_score = metrics.get('effort_score', None)
+
+                    # Insert or update (upsert)
+                    cur.execute("""
+                        INSERT INTO developer_analytics
+                        (user_email, project_id, date, commits_count, lines_added, lines_removed,
+                         issues_found, bugs_fixed, files_changed, code_quality_score, effort_score)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (user_email, project_id, date)
+                        DO UPDATE SET
+                            commits_count = developer_analytics.commits_count + EXCLUDED.commits_count,
+                            lines_added = developer_analytics.lines_added + EXCLUDED.lines_added,
+                            lines_removed = developer_analytics.lines_removed + EXCLUDED.lines_removed,
+                            issues_found = developer_analytics.issues_found + EXCLUDED.issues_found,
+                            bugs_fixed = developer_analytics.bugs_fixed + EXCLUDED.bugs_fixed,
+                            files_changed = developer_analytics.files_changed + EXCLUDED.files_changed,
+                            code_quality_score = EXCLUDED.code_quality_score,
+                            effort_score = EXCLUDED.effort_score
+                    """, (user_email, project_id, date, commits, lines_added, lines_removed,
+                          issues, bugs_fixed, files_changed, quality_score, effort_score))
+                    conn.commit()
+                    return True
+        except Exception as e:
+            print(f"[DB Error] log_analytics: {e}")
+            return False
+
+    def get_analytics(self, user_email: Optional[str] = None, project_id: Optional[int] = None,
+                     start_date: Optional[date] = None, end_date: Optional[date] = None) -> List[Dict[str, Any]]:
+        """Get analytics data with filters."""
+        with self.connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                query = """
+                    SELECT da.*, u.name as user_name, p.name as project_name
+                    FROM developer_analytics da
+                    JOIN users u ON da.user_email = u.email
+                    JOIN projects p ON da.project_id = p.id
+                    WHERE 1=1
+                """
+                params = []
+
+                if user_email:
+                    query += " AND da.user_email = %s"
+                    params.append(user_email)
+                if project_id:
+                    query += " AND da.project_id = %s"
+                    params.append(project_id)
+                if start_date:
+                    query += " AND da.date >= %s"
+                    params.append(start_date)
+                if end_date:
+                    query += " AND da.date <= %s"
+                    params.append(end_date)
+
+                query += " ORDER BY da.date DESC"
+
+                cur.execute(query, params)
+                return [dict(row) for row in cur.fetchall()]
+
+    def queue_email_notification(self, recipient: str, subject: str, body: str, notification_type: str) -> bool:
+        """Queue an email notification."""
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO email_notifications (recipient_email, subject, body, notification_type)
+                        VALUES (%s, %s, %s, %s)
+                    """, (recipient, subject, body, notification_type))
+                    conn.commit()
+                    return True
+        except Exception:
+            return False
+
+    def get_pending_emails(self) -> List[Dict[str, Any]]:
+        """Get all pending email notifications."""
+        with self.connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT * FROM email_notifications
+                    WHERE status = 'pending'
+                    ORDER BY sent_at ASC
+                """)
+                return [dict(row) for row in cur.fetchall()]
+
+    def mark_email_sent(self, email_id: int, status: str = 'sent') -> bool:
+        """Mark email as sent or failed."""
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE email_notifications
+                        SET status = %s, sent_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """, (status, email_id))
+                    conn.commit()
+                    return True
+        except Exception:
+            return False

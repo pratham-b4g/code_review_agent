@@ -1,8 +1,6 @@
 """Lightweight HTTP server that serves the CRA dashboard.
 
-No external dependencies — uses only the Python standard library
-(http.server + json).  The review is run on-demand via the /api/scan
-endpoint and results are served as JSON.
+Supports multi-user mode with PostgreSQL backend for team collaboration.
 """
 
 import json
@@ -21,6 +19,10 @@ from agent.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _STATIC_DIR = Path(__file__).parent / "static"
+
+# Multi-user mode flag and current user
+_mode: str = "developer"  # 'admin' or 'developer'
+_current_user: Optional[Dict[str, Any]] = None
 
 # Global store for the latest scan results (populated by /api/scan or pre-loaded)
 _scan_result: Dict[str, Any] = {}
@@ -45,10 +47,20 @@ def _serialize_violations(violations: list) -> List[Dict[str, Any]]:
     return out
 
 
+def _get_db():
+    """Get database manager instance."""
+    from agent.database import DatabaseManager
+    return DatabaseManager()
+
+
+def _get_email_notifier():
+    """Get email notifier instance."""
+    from agent.utils.email_notifier import get_notifier
+    return get_notifier()
+
+
 def _run_scan(project_dir: str, language: Optional[str] = None,
               framework: Optional[str] = None) -> Dict[str, Any]:
-    """Run a full review and return JSON-serialisable results."""
-    from agent.detector.language_detector import LanguageDetector
     from agent.detector.framework_detector import FrameworkDetector
     from agent.git.git_utils import scan_directory
     from agent.utils.config_manager import ConfigManager
@@ -133,6 +145,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
+        # Multi-user mode: serve multi_user.html instead of index.html
+        if _mode in ('admin', 'developer') and (path == "/" or path == ""):
+            self.path = "/multi_user.html"
+            return super().do_GET()
+
         # API: return scan data
         if path == "/api/data":
             with _scan_lock:
@@ -174,11 +191,351 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._json_response(payload)
             return
 
+        # ── Multi-User API Endpoints ────────────────────────────────────────
+
+        # Check first run
+        if path == "/api/auth/first-run":
+            try:
+                db = _get_db()
+                db.init_schema()
+                is_first = db.is_first_run()
+                self._json_response({"is_first_run": is_first})
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Get all TLs (for access request dropdown)
+        if path == "/api/users/tls":
+            try:
+                db = _get_db()
+                tls = db.get_all_users(role='admin')
+                self._json_response([{"email": u["email"], "name": u["name"]} for u in tls])
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Get all users (super admin only)
+        if path == "/api/users":
+            try:
+                db = _get_db()
+                users = db.get_all_users()
+                self._json_response(users)
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Get all projects
+        if path == "/api/projects":
+            try:
+                db = _get_db()
+                projects = db.get_all_projects()
+                self._json_response(projects)
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Get my projects (for TLs and developers)
+        if path == "/api/my-projects":
+            if not _current_user:
+                self._json_response({"error": "Not authenticated"}, 401)
+                return
+            try:
+                db = _get_db()
+                projects = db.get_user_projects(_current_user["email"])
+                self._json_response(projects)
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Get access requests
+        if path == "/api/access-requests":
+            qs = parse_qs(parsed.query)
+            tl_email = qs.get("tl_email", [None])[0]
+            try:
+                db = _get_db()
+                requests = db.get_pending_access_requests(tl_email)
+                self._json_response(requests)
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Get analytics data
+        if path == "/api/analytics":
+            qs = parse_qs(parsed.query)
+            user_email = qs.get("user_email", [None])[0]
+            project_id = qs.get("project_id", [None])[0]
+            days = int(qs.get("days", ["7"])[0])
+
+            # If project_id is provided, convert to int
+            if project_id:
+                try:
+                    project_id = int(project_id)
+                except ValueError:
+                    project_id = None
+
+            try:
+                from agent.analytics import get_tracker
+                tracker = get_tracker()
+                summary = tracker.get_analytics_summary(
+                    project_id=project_id,
+                    user_email=user_email,
+                    days=days
+                )
+                self._json_response(summary)
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Get detailed analytics (time series data)
+        if path == "/api/analytics/detail":
+            qs = parse_qs(parsed.query)
+            user_email = qs.get("user_email", [None])[0]
+            project_id = qs.get("project_id", [None])[0]
+            days = int(qs.get("days", ["30"])[0])
+
+            if project_id:
+                try:
+                    project_id = int(project_id)
+                except ValueError:
+                    project_id = None
+
+            try:
+                from datetime import date, timedelta
+                db = _get_db()
+                end_date = date.today()
+                start_date = end_date - timedelta(days=days)
+
+                data = db.get_analytics(
+                    user_email=user_email,
+                    project_id=project_id,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                self._json_response(data)
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
         # Static files
         if path == "/" or path == "":
             self.path = "/index.html"
 
         return super().do_GET()
+
+    def do_POST(self):
+        """Handle POST requests for multi-user operations."""
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        # Read request body
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode('utf-8')) if body else {}
+        except json.JSONDecodeError:
+            self._json_response({"error": "Invalid JSON"}, 400)
+            return
+
+        # First run setup
+        if path == "/api/auth/first-run-setup":
+            try:
+                db = _get_db()
+                success = db.create_super_admin(data.get("email"), data.get("name"), data.get("password"))
+                if success:
+                    global _current_user
+                    _current_user = {"email": data["email"], "name": data["name"], "role": "super_admin", "id": 1}
+                    self._json_response({"success": True, "user": _current_user})
+                else:
+                    self._json_response({"error": "Failed to create super admin"}, 500)
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Login
+        if path == "/api/auth/login":
+            try:
+                db = _get_db()
+                mode = data.get("mode")
+
+                if mode == "admin":
+                    # Super admin login with password
+                    from agent.config.auth_config import SUPER_ADMIN_EMAIL, SUPER_ADMIN_PASSWORD
+                    if data.get("email") == SUPER_ADMIN_EMAIL and data.get("password") == SUPER_ADMIN_PASSWORD:
+                        # Get or create super admin in DB
+                        user = db.get_user_by_email(SUPER_ADMIN_EMAIL)
+                        if not user:
+                            db.create_user(SUPER_ADMIN_EMAIL, "Super Admin", "super_admin", None)
+                            user = db.get_user_by_email(SUPER_ADMIN_EMAIL)
+                        global _current_user
+                        _current_user = user
+                        self._json_response({"success": True, "user": user})
+                    else:
+                        self._json_response({"error": "Invalid credentials"}, 401)
+
+                else:
+                    # Developer/TL login with email only
+                    user = db.get_user_by_email(data.get("email"))
+                    if user:
+                        _current_user = user
+                        self._json_response({"success": True, "user": user})
+                    else:
+                        # Check if there are any TLs they can request from
+                        tls = db.get_all_users(role='admin')
+                        self._json_response({"success": False, "not_registered": True, "available_tls": len(tls)})
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Create access request
+        if path == "/api/access-requests":
+            try:
+                db = _get_db()
+                success = db.create_access_request(
+                    data.get("requester_email"),
+                    data.get("requester_name"),
+                    data.get("tl_email")
+                )
+
+                # Send email notification to TL
+                if success:
+                    notifier = _get_email_notifier()
+                    notifier.send_access_request_notification(
+                        data.get("tl_email"),
+                        data.get("requester_name"),
+                        data.get("requester_email")
+                    )
+
+                self._json_response({"success": success})
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Respond to access request
+        if path.startswith("/api/access-requests/") and path.endswith("/respond"):
+            try:
+                request_id = int(path.split("/")[3])
+                db = _get_db()
+
+                # Get request details before responding
+                requests = db.get_pending_access_requests()
+                request_details = None
+                for r in requests:
+                    if r['id'] == request_id:
+                        request_details = r
+                        break
+
+                success = db.respond_to_access_request(
+                    request_id,
+                    data.get("status"),
+                    data.get("responded_by")
+                )
+
+                # Send email notification to developer
+                if success and request_details:
+                    notifier = _get_email_notifier()
+                    # Get TL name
+                    tl_user = db.get_user_by_email(request_details['tl_email'])
+                    tl_name = tl_user['name'] if tl_user else request_details['tl_email']
+
+                    notifier.send_access_request_response(
+                        request_details['requester_email'],
+                        request_details['requester_name'],
+                        data.get("status"),
+                        tl_name,
+                        data.get("notes", "")
+                    )
+
+                self._json_response({"success": success})
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Create user (super admin only)
+        if path == "/api/users":
+            if not _current_user or _current_user.get("role") != "super_admin":
+                self._json_response({"error": "Unauthorized"}, 403)
+                return
+            try:
+                db = _get_db()
+                success = db.create_user(
+                    data.get("email"),
+                    data.get("name"),
+                    data.get("role"),
+                    _current_user.get("id")
+                )
+                self._json_response({"success": success})
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Create project (super admin or TL)
+        if path == "/api/projects":
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            try:
+                db = _get_db()
+                project_id = db.create_project(
+                    data.get("name"),
+                    data.get("path"),
+                    data.get("main_branch", "main"),
+                    _current_user.get("id")
+                )
+                self._json_response({"success": project_id is not None, "project_id": project_id})
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Assign user to project
+        if path == "/api/project-assignments":
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            try:
+                db = _get_db()
+
+                # Get project details for email
+                projects = db.get_all_projects()
+                project_name = None
+                for p in projects:
+                    if p['id'] == data.get("project_id"):
+                        project_name = p['name']
+                        break
+
+                success = db.assign_user_to_project(
+                    data.get("project_id"),
+                    data.get("user_email"),
+                    data.get("role"),
+                    _current_user.get("id")
+                )
+
+                # Send email notification to user
+                if success and project_name:
+                    notifier = _get_email_notifier()
+                    user = db.get_user_by_email(data.get("user_email"))
+                    if user:
+                        notifier.send_project_assignment_notification(
+                            user['email'],
+                            user['name'],
+                            project_name,
+                            _current_user.get('name', 'Admin'),
+                            data.get("role", "developer")
+                        )
+
+                self._json_response({"success": success})
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        self._json_response({"error": "Not found"}, 404)
+
+    def do_OPTIONS(self):
+        """Handle CORS preflight requests."""
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def _json_response(self, data: Any, status: int = 200):
         body = json.dumps(data, default=str).encode("utf-8")
@@ -236,29 +593,67 @@ def _kill_port(port: int) -> None:
         pass  # best-effort — don't let this block startup
 
 
-def run_dashboard(project_dir: str, port: int = 9090,
+def run_dashboard(project_dir: Optional[str] = None, port: int = 9090,
                   language: Optional[str] = None,
                   framework: Optional[str] = None,
-                  no_open: bool = False) -> int:
+                  no_open: bool = False,
+                  mode: str = 'developer') -> int:
     """Run the dashboard server.
 
-    1. Scan the project
-    2. Start HTTP server
-    3. Open browser
+    Args:
+        project_dir: Project directory to scan (None for multi-user admin mode)
+        port: Server port
+        language: Override language detection
+        framework: Override framework detection
+        no_open: Don't auto-open browser
+        mode: 'developer' for normal dashboard, 'admin' for multi-user admin panel
+
+    For multi-user mode:
+        1. Initialize database
+        2. Start HTTP server
+        3. User logs in via web UI
     """
-    global _scan_result
+    global _scan_result, _mode, _current_user
+    _mode = mode
 
-    print(f"\n  Scanning {project_dir} ...")
-    result = _run_scan(project_dir, language, framework)
-    with _scan_lock:
-        _scan_result = result
+    if mode in ('admin', 'developer'):
+        # Multi-user mode - initialize database
+        print(f"\n  Starting CRA Multi-User Dashboard")
+        print(f"  Mode: {mode.upper()}")
+        print(f"  Initializing database...")
 
-    errs = result["summary"]["errors"]
-    warns = result["summary"]["warnings"]
-    infos = result["summary"]["infos"]
-    total = result["summary"]["total"]
+        try:
+            db = _get_db()
+            db.init_schema()
+            is_first = db.is_first_run()
 
-    print(f"  Found {total} issue(s): {errs} error(s), {warns} warning(s), {infos} info(s)")
+            if is_first:
+                print(f"\n  🎉 First run! Database initialized.")
+                print(f"  Open http://localhost:{port} to create Super Admin account.")
+            else:
+                user_count = len(db.get_all_users())
+                print(f"  ✓ Database ready ({user_count} users)")
+        except Exception as e:
+            print(f"\n  ⚠️ Database error: {e}")
+            print(f"  Make sure PostgreSQL is running and accessible.")
+            return 1
+    else:
+        # Single-user mode - scan project
+        if not project_dir:
+            print("[ERROR] project_dir required for single-user mode")
+            return 2
+
+        print(f"\n  Scanning {project_dir} ...")
+        result = _run_scan(project_dir, language, framework)
+        with _scan_lock:
+            _scan_result = result
+
+        errs = result["summary"]["errors"]
+        warns = result["summary"]["warnings"]
+        infos = result["summary"]["infos"]
+        total = result["summary"]["total"]
+
+        print(f"  Found {total} issue(s): {errs} error(s), {warns} warning(s), {infos} info(s)")
 
     # Kill any existing dashboard process on the target port
     _kill_port(port)

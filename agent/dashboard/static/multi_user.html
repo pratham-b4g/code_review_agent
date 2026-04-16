@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CRA Dashboard - Multi User</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            bg: { dark: '#0f1117', card: '#161b22', hover: '#1c2333' },
+            accent: { blue: '#58a6ff', green: '#3fb950', red: '#f85149', yellow: '#d29922', purple: '#bc8cff' },
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+    body { font-family: 'Inter', sans-serif; }
+    .mono { font-family: 'JetBrains Mono', monospace; }
+    .code-line { transition: background 0.15s; }
+    .code-line.highlighted { background: rgba(248, 81, 73, 0.12); border-left: 3px solid #f85149; }
+    .code-line.highlighted-warn { background: rgba(210, 153, 34, 0.10); border-left: 3px solid #d29922; }
+    .code-line.highlighted-info { background: rgba(88, 166, 255, 0.08); border-left: 3px solid #58a6ff; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #161b22; }
+    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
+    .severity-badge { font-size: 0.7rem; padding: 2px 8px; border-radius: 9999px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+    .fade-in { animation: fadeIn 0.3s ease-in; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .sidebar-item { transition: all 0.15s; }
+    .sidebar-item:hover { background: #1c2333; }
+    .sidebar-item.active { background: #1c2333; border-left: 3px solid #58a6ff; }
+    .tab-btn { transition: all 0.15s; }
+    .tab-btn.active { background: #1c2333; color: #58a6ff; border-bottom: 2px solid #58a6ff; }
+    .modal-overlay { background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(4px); }
+  </style>
+</head>
+<body class="h-full bg-bg-dark text-gray-300">
+  <div id="app" class="h-full flex flex-col">
+    <!-- Top Nav -->
+    <header class="bg-bg-card border-b border-gray-800 px-6 py-3 flex items-center justify-between shrink-0">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-accent-blue flex items-center justify-center">
+          <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+        </div>
+        <h1 class="text-lg font-bold text-white">Code Review Agent</h1>
+        <span class="text-xs text-gray-500 ml-2 mono" id="modeBadge">Multi-User</span>
+      </div>
+      <div class="flex items-center gap-4">
+        <span class="text-sm text-gray-400" id="userDisplay"></span>
+        <button onclick="logout()" class="px-3 py-1.5 bg-gray-700 text-gray-300 text-sm rounded-lg hover:bg-gray-600 transition">
+          Logout
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <div class="flex-1 overflow-hidden flex" id="mainArea">
+      <!-- Sidebar Navigation -->
+      <aside class="w-64 bg-bg-card border-r border-gray-800 flex flex-col shrink-0">
+        <nav class="p-4 space-y-1" id="navMenu">
+          <!-- Nav items injected by JS -->
+        </nav>
+      </aside>
+
+      <!-- Content Panel -->
+      <main class="flex-1 overflow-auto p-6" id="contentPanel">
+        <!-- Content injected by JS -->
+      </main>
+    </div>
+  </div>
+
+  <!-- Login Modal (shown initially) -->
+  <div id="loginModal" class="fixed inset-0 z-50 flex items-center justify-center modal-overlay">
+    <div class="bg-bg-card border border-gray-700 rounded-xl shadow-2xl w-full max-w-md p-8">
+      <div id="loginTabs" class="flex mb-6 border-b border-gray-700">
+        <button class="flex-1 py-3 text-sm font-medium text-gray-400 tab-btn active" data-tab="developer" onclick="switchLoginTab('developer')">
+          Developer / TL
+        </button>
+        <button class="flex-1 py-3 text-sm font-medium text-gray-400 tab-btn" data-tab="admin" onclick="switchLoginTab('admin')">
+          Super Admin
+        </button>
+      </div>
+
+      <!-- Developer/TL Login -->
+      <div id="developerLogin" class="login-panel">
+        <div class="text-center mb-6">
+          <div class="w-16 h-16 rounded-full bg-accent-blue/20 flex items-center justify-center mx-auto mb-4">
+            <svg class="w-8 h-8 text-accent-blue" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+          </div>
+          <h2 class="text-xl font-bold text-white">Developer / TL Login</h2>
+          <p class="text-sm text-gray-500 mt-2">Access your assigned projects</p>
+        </div>
+        <div id="devLoginForm">
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-400 mb-2">Git Email</label>
+            <input type="email" id="devEmail" class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-accent-blue" placeholder="your@email.com" />
+            <p class="text-xs text-gray-500 mt-1">This should match your git config user.email</p>
+          </div>
+          <button onclick="developerLogin()" class="w-full bg-accent-blue text-white font-semibold py-3 rounded-lg hover:bg-blue-600 transition">
+            Access Dashboard
+          </button>
+        </div>
+        <div id="devNotRegistered" class="hidden text-center mt-4 p-4 bg-bg-dark rounded-lg">
+          <p class="text-red-400 mb-3">You are not registered in the system.</p>
+          <button onclick="showRequestForm()" class="text-accent-blue hover:underline">Request Access</button>
+        </div>
+      </div>
+
+      <!-- Super Admin Login -->
+      <div id="adminLogin" class="login-panel hidden">
+        <div class="text-center mb-6">
+          <div class="w-16 h-16 rounded-full bg-accent-purple/20 flex items-center justify-center mx-auto mb-4">
+            <svg class="w-8 h-8 text-accent-purple" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+          </div>
+          <h2 class="text-xl font-bold text-white">Super Admin Login</h2>
+          <p class="text-sm text-gray-500 mt-2">Full system management</p>
+        </div>
+        <div class="mb-4">
+          <label class="block text-sm font-medium text-gray-400 mb-2">Email</label>
+          <input type="email" id="adminEmail" class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-accent-purple" placeholder="admin@example.com" />
+        </div>
+        <div class="mb-6">
+          <label class="block text-sm font-medium text-gray-400 mb-2">Password</label>
+          <input type="password" id="adminPassword" class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-accent-purple" placeholder="••••••••" />
+        </div>
+        <button onclick="adminLogin()" class="w-full bg-accent-purple text-white font-semibold py-3 rounded-lg hover:bg-purple-600 transition">
+          Login as Super Admin
+        </button>
+      </div>
+
+      <!-- First Run Setup -->
+      <div id="firstRunSetup" class="login-panel hidden">
+        <div class="text-center mb-6">
+          <div class="w-16 h-16 rounded-full bg-accent-green/20 flex items-center justify-center mx-auto mb-4">
+            <svg class="w-8 h-8 text-accent-green" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/></svg>
+          </div>
+          <h2 class="text-xl font-bold text-white">Welcome! First Time Setup</h2>
+          <p class="text-sm text-gray-500 mt-2">Create the Super Admin account</p>
+        </div>
+        <div class="mb-4">
+          <label class="block text-sm font-medium text-gray-400 mb-2">Your Name</label>
+          <input type="text" id="setupName" class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-accent-green" placeholder="John Doe" />
+        </div>
+        <div class="mb-4">
+          <label class="block text-sm font-medium text-gray-400 mb-2">Email</label>
+          <input type="email" id="setupEmail" class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-accent-green" placeholder="admin@example.com" />
+        </div>
+        <div class="mb-6">
+          <label class="block text-sm font-medium text-gray-400 mb-2">Password</label>
+          <input type="password" id="setupPassword" class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-accent-green" placeholder="••••••••" />
+        </div>
+        <button onclick="firstRunSetup()" class="w-full bg-accent-green text-white font-semibold py-3 rounded-lg hover:bg-green-600 transition">
+          Create Super Admin Account
+        </button>
+      </div>
+
+      <!-- Request Access Form -->
+      <div id="requestAccessForm" class="login-panel hidden">
+        <div class="text-center mb-6">
+          <h2 class="text-xl font-bold text-white">Request Access</h2>
+          <p class="text-sm text-gray-500 mt-2">Ask a TL to add you to a project</p>
+        </div>
+        <div class="mb-4">
+          <label class="block text-sm font-medium text-gray-400 mb-2">Your Name</label>
+          <input type="text" id="reqName" class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-accent-blue" placeholder="John Doe" />
+        </div>
+        <div class="mb-4">
+          <label class="block text-sm font-medium text-gray-400 mb-2">Your Email</label>
+          <input type="email" id="reqEmail" class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-accent-blue" placeholder="dev@example.com" />
+        </div>
+        <div class="mb-6">
+          <label class="block text-sm font-medium text-gray-400 mb-2">TL Email</label>
+          <select id="reqTLEmail" class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-accent-blue">
+            <option value="">Select a TL...</option>
+          </select>
+        </div>
+        <div class="flex gap-3">
+          <button onclick="hideRequestForm()" class="flex-1 bg-gray-700 text-gray-300 font-semibold py-3 rounded-lg hover:bg-gray-600 transition">
+            Cancel
+          </button>
+          <button onclick="submitAccessRequest()" class="flex-1 bg-accent-blue text-white font-semibold py-3 rounded-lg hover:bg-blue-600 transition">
+            Submit Request
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Global state
+    let currentUser = null;
+    let currentRole = null; // 'super_admin', 'admin', 'developer'
+    let currentView = 'projects';
+    let allTLs = [];
+
+    // ── Login Tab Switching ─────────────────────────────────────
+    function switchLoginTab(tab) {
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.remove('active');
+        if (btn.dataset.tab === tab) btn.classList.add('active');
+      });
+      document.querySelectorAll('.login-panel').forEach(panel => panel.classList.add('hidden'));
+      document.getElementById(tab + 'Login').classList.remove('hidden');
+    }
+
+    // ── Check First Run ────────────────────────────────────────────
+    async function checkFirstRun() {
+      try {
+        const res = await fetch('/api/auth/first-run');
+        const data = await res.json();
+        if (data.is_first_run) {
+          document.getElementById('loginTabs').classList.add('hidden');
+          document.querySelectorAll('.login-panel').forEach(p => p.classList.add('hidden'));
+          document.getElementById('firstRunSetup').classList.remove('hidden');
+        }
+      } catch (e) {
+        console.error('Error checking first run:', e);
+      }
+    }
+
+    // ── First Run Setup ──────────────────────────────────────────
+    async function firstRunSetup() {
+      const name = document.getElementById('setupName').value;
+      const email = document.getElementById('setupEmail').value;
+      const password = document.getElementById('setupPassword').value;
+
+      if (!name || !email || !password) {
+        alert('Please fill all fields');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/auth/first-run-setup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, email, password })
+        });
+        const data = await res.json();
+        if (data.success) {
+          currentUser = { email, name, role: 'super_admin' };
+          currentRole = 'super_admin';
+          closeLoginModal();
+          initDashboard();
+        } else {
+          alert(data.error || 'Setup failed');
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    // ── Developer Login ──────────────────────────────────────────
+    async function developerLogin() {
+      const email = document.getElementById('devEmail').value;
+      if (!email) {
+        alert('Please enter your email');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, mode: 'developer' })
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          currentUser = data.user;
+          currentRole = data.user.role;
+          closeLoginModal();
+          initDashboard();
+        } else if (data.not_registered) {
+          document.getElementById('devLoginForm').classList.add('hidden');
+          document.getElementById('devNotRegistered').classList.remove('hidden');
+          await loadTLs();
+        } else {
+          alert(data.error || 'Login failed');
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    // ── Admin Login ─────────────────────────────────────────────
+    async function adminLogin() {
+      const email = document.getElementById('adminEmail').value;
+      const password = document.getElementById('adminPassword').value;
+
+      if (!email || !password) {
+        alert('Please fill all fields');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password, mode: 'admin' })
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          currentUser = data.user;
+          currentRole = 'super_admin';
+          closeLoginModal();
+          initDashboard();
+        } else {
+          alert(data.error || 'Invalid credentials');
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    // ── Request Access Form ──────────────────────────────────────
+    async function loadTLs() {
+      try {
+        const res = await fetch('/api/users/tls');
+        allTLs = await res.json();
+        const select = document.getElementById('reqTLEmail');
+        select.innerHTML = '<option value="">Select a TL...</option>' +
+          allTLs.map(tl => `<option value="${tl.email}">${tl.name} (${tl.email})</option>`).join('');
+      } catch (e) {
+        console.error('Error loading TLs:', e);
+      }
+    }
+
+    function showRequestForm() {
+      const email = document.getElementById('devEmail').value;
+      document.getElementById('reqEmail').value = email;
+      document.querySelectorAll('.login-panel').forEach(p => p.classList.add('hidden'));
+      document.getElementById('requestAccessForm').classList.remove('hidden');
+    }
+
+    function hideRequestForm() {
+      document.getElementById('requestAccessForm').classList.add('hidden');
+      document.getElementById('devNotRegistered').classList.add('hidden');
+      document.getElementById('devLoginForm').classList.remove('hidden');
+    }
+
+    async function submitAccessRequest() {
+      const name = document.getElementById('reqName').value;
+      const email = document.getElementById('reqEmail').value;
+      const tlEmail = document.getElementById('reqTLEmail').value;
+
+      if (!name || !email || !tlEmail) {
+        alert('Please fill all fields');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/access-requests', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requester_name: name, requester_email: email, tl_email: tlEmail })
+        });
+        const data = await res.json();
+        if (data.success) {
+          alert('Access request submitted! The TL will be notified.');
+          hideRequestForm();
+        } else {
+          alert(data.error || 'Request failed');
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    // ── Close Login Modal ────────────────────────────────────────
+    function closeLoginModal() {
+      document.getElementById('loginModal').classList.add('hidden');
+    }
+
+    // ── Logout ───────────────────────────────────────────────────
+    function logout() {
+      currentUser = null;
+      currentRole = null;
+      location.reload();
+    }
+
+    // ── Initialize Dashboard ─────────────────────────────────────
+    function initDashboard() {
+      document.getElementById('userDisplay').textContent = currentUser.name + ' (' + currentRole + ')';
+      renderNav();
+      loadView('projects');
+    }
+
+    // ── Render Navigation ────────────────────────────────────────
+    function renderNav() {
+      const nav = document.getElementById('navMenu');
+      let items = [];
+
+      if (currentRole === 'super_admin') {
+        items = [
+          { id: 'projects', label: 'Projects', icon: '📁' },
+          { id: 'users', label: 'Users', icon: '👥' },
+          { id: 'access-requests', label: 'Access Requests', icon: '📝' },
+          { id: 'analytics', label: 'Analytics', icon: '📊' },
+          { id: 'settings', label: 'Settings', icon: '⚙️' }
+        ];
+      } else if (currentRole === 'admin') {
+        items = [
+          { id: 'my-projects', label: 'My Projects', icon: '📁' },
+          { id: 'developers', label: 'My Developers', icon: '👥' },
+          { id: 'access-requests', label: 'Access Requests', icon: '📝' },
+          { id: 'analytics', label: 'Team Analytics', icon: '📊' }
+        ];
+      } else {
+        // Developer
+        items = [
+          { id: 'my-projects', label: 'My Projects', icon: '📁' },
+          { id: 'analytics', label: 'My Activity', icon: '📊' }
+        ];
+      }
+
+      nav.innerHTML = items.map(item => `
+        <button onclick="loadView('${item.id}')" class="sidebar-item w-full flex items-center gap-3 px-4 py-3 rounded-lg text-left text-sm ${currentView === item.id ? 'active text-white' : 'text-gray-400 hover:text-white'}"
+                data-view="${item.id}">
+          <span>${item.icon}</span>
+          <span>${item.label}</span>
+        </button>
+      `).join('');
+    }
+
+    // ── Load View Content ────────────────────────────────────────
+    async function loadView(view) {
+      currentView = view;
+      renderNav();
+      const panel = document.getElementById('contentPanel');
+      panel.innerHTML = '<div class="flex items-center justify-center h-full"><div class="text-gray-500">Loading...</div></div>';
+
+      switch(view) {
+        case 'projects':
+          await loadProjectsView(panel);
+          break;
+        case 'users':
+          await loadUsersView(panel);
+          break;
+        case 'access-requests':
+          await loadAccessRequestsView(panel);
+          break;
+        case 'analytics':
+          await loadAnalyticsView(panel);
+          break;
+        case 'my-projects':
+          await loadMyProjectsView(panel);
+          break;
+        case 'developers':
+          await loadDevelopersView(panel);
+          break;
+        case 'settings':
+          await loadSettingsView(panel);
+          break;
+        default:
+          panel.innerHTML = '<div class="text-gray-500">View not implemented yet</div>';
+      }
+    }
+
+    // ── Projects View (Super Admin) ──────────────────────────────
+    async function loadProjectsView(panel) {
+      try {
+        const res = await fetch('/api/projects');
+        const projects = await res.json();
+
+        panel.innerHTML = `
+          <div class="flex justify-between items-center mb-6">
+            <h2 class="text-xl font-bold text-white">All Projects</h2>
+            <button onclick="showAddProjectModal()" class="px-4 py-2 bg-accent-blue text-white rounded-lg hover:bg-blue-600 transition">
+              + Add Project
+            </button>
+          </div>
+          <div class="grid gap-4">
+            ${projects.length === 0 ? '<p class="text-gray-500">No projects yet</p>' : ''}
+            ${projects.map(p => `
+              <div class="bg-bg-card border border-gray-800 rounded-lg p-4">
+                <div class="flex justify-between items-start">
+                  <div>
+                    <h3 class="font-semibold text-white">${p.name}</h3>
+                    <p class="text-sm text-gray-500 mono mt-1">${p.path}</p>
+                    <p class="text-xs text-gray-600 mt-1">Main branch: ${p.main_branch}</p>
+                  </div>
+                  <div class="flex gap-2">
+                    <button onclick="viewProject(${p.id})" class="px-3 py-1 text-sm bg-gray-700 text-gray-300 rounded hover:bg-gray-600">View</button>
+                    <button onclick="assignUsers(${p.id})" class="px-3 py-1 text-sm bg-accent-blue/20 text-accent-blue rounded hover:bg-accent-blue/30">Assign</button>
+                  </div>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        `;
+      } catch (e) {
+        panel.innerHTML = `<div class="text-red-400">Error loading projects: ${e.message}</div>`;
+      }
+    }
+
+    // ── Users View (Super Admin) ─────────────────────────────────
+    async function loadUsersView(panel) {
+      try {
+        const res = await fetch('/api/users');
+        const users = await res.json();
+
+        panel.innerHTML = `
+          <div class="flex justify-between items-center mb-6">
+            <h2 class="text-xl font-bold text-white">All Users</h2>
+            <button onclick="showAddUserModal()" class="px-4 py-2 bg-accent-blue text-white rounded-lg hover:bg-blue-600 transition">
+              + Add User
+            </button>
+          </div>
+          <div class="bg-bg-card border border-gray-800 rounded-lg overflow-hidden">
+            <table class="w-full text-left">
+              <thead class="bg-bg-dark border-b border-gray-800">
+                <tr>
+                  <th class="px-4 py-3 text-sm font-medium text-gray-400">Name</th>
+                  <th class="px-4 py-3 text-sm font-medium text-gray-400">Email</th>
+                  <th class="px-4 py-3 text-sm font-medium text-gray-400">Role</th>
+                  <th class="px-4 py-3 text-sm font-medium text-gray-400">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${users.map(u => `
+                  <tr class="border-b border-gray-800/50">
+                    <td class="px-4 py-3 text-sm text-white">${u.name}</td>
+                    <td class="px-4 py-3 text-sm text-gray-400 mono">${u.email}</td>
+                    <td class="px-4 py-3"><span class="severity-badge ${u.role === 'super_admin' ? 'bg-accent-purple/20 text-accent-purple' : u.role === 'admin' ? 'bg-accent-blue/20 text-accent-blue' : 'bg-gray-700 text-gray-300'}">${u.role}</span></td>
+                    <td class="px-4 py-3"><span class="text-accent-green">${u.is_active ? 'Active' : 'Inactive'}</span></td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        `;
+      } catch (e) {
+        panel.innerHTML = `<div class="text-red-400">Error loading users: ${e.message}</div>`;
+      }
+    }
+
+    // ── Access Requests View ─────────────────────────────────────
+    async function loadAccessRequestsView(panel) {
+      try {
+        const url = currentRole === 'super_admin' ? '/api/access-requests' : `/api/access-requests?tl_email=${currentUser.email}`;
+        const res = await fetch(url);
+        const requests = await res.json();
+
+        panel.innerHTML = `
+          <h2 class="text-xl font-bold text-white mb-6">Access Requests</h2>
+          <div class="space-y-3">
+            ${requests.length === 0 ? '<p class="text-gray-500">No pending requests</p>' : ''}
+            ${requests.map(r => `
+              <div class="bg-bg-card border border-gray-800 rounded-lg p-4">
+                <div class="flex justify-between items-start">
+                  <div>
+                    <h3 class="font-semibold text-white">${r.requester_name}</h3>
+                    <p class="text-sm text-gray-400 mono">${r.requester_email}</p>
+                    <p class="text-xs text-gray-600 mt-1">Requested: ${new Date(r.requested_at).toLocaleString()}</p>
+                    ${r.notes ? `<p class="text-sm text-gray-500 mt-2">Notes: ${r.notes}</p>` : ''}
+                  </div>
+                  <div class="flex gap-2">
+                    <button onclick="respondToRequest(${r.id}, 'rejected')" class="px-3 py-1 text-sm bg-accent-red/20 text-accent-red rounded hover:bg-accent-red/30">Reject</button>
+                    <button onclick="respondToRequest(${r.id}, 'approved')" class="px-3 py-1 text-sm bg-accent-green/20 text-accent-green rounded hover:bg-accent-green/30">Approve</button>
+                  </div>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        `;
+      } catch (e) {
+        panel.innerHTML = `<div class="text-red-400">Error loading requests: ${e.message}</div>`;
+      }
+    }
+
+    // ── Respond to Access Request ──────────────────────────────────
+    async function respondToRequest(requestId, status) {
+      try {
+        const res = await fetch(`/api/access-requests/${requestId}/respond`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status, responded_by: currentUser.id })
+        });
+        const data = await res.json();
+        if (data.success) {
+          alert(`Request ${status}`);
+          loadView('access-requests');
+        } else {
+          alert(data.error || 'Failed to respond');
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    // ── Analytics View ─────────────────────────────────────────────
+    let analyticsDays = 7;
+    let analyticsData = null;
+
+    async function loadAnalyticsView(panel) {
+      const isDev = currentRole === 'developer';
+
+      panel.innerHTML = `
+        <div class="flex justify-between items-center mb-6">
+          <h2 class="text-xl font-bold text-white">${isDev ? 'My Activity' : 'Team Analytics'}</h2>
+          <div class="flex items-center gap-3">
+            <select id="analyticsDays" onchange="changeAnalyticsDays(this.value)" class="bg-bg-dark border border-gray-700 text-white rounded-lg px-3 py-2 text-sm">
+              <option value="7" ${analyticsDays === 7 ? 'selected' : ''}>Last 7 days</option>
+              <option value="14" ${analyticsDays === 14 ? 'selected' : ''}>Last 14 days</option>
+              <option value="30" ${analyticsDays === 30 ? 'selected' : ''}>Last 30 days</option>
+              <option value="90" ${analyticsDays === 90 ? 'selected' : ''}>Last 90 days</option>
+            </select>
+            <button onclick="refreshAnalytics()" class="px-3 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-600 text-sm">
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        <!-- Summary Cards -->
+        <div id="analyticsSummary" class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+          <div class="bg-bg-card border border-gray-800 rounded-lg p-4 text-center">
+            <div class="text-3xl font-bold text-accent-blue" id="statCommits">-</div>
+            <div class="text-sm text-gray-500 mt-1">Commits</div>
+          </div>
+          <div class="bg-bg-card border border-gray-800 rounded-lg p-4 text-center">
+            <div class="text-3xl font-bold text-accent-red" id="statIssues">-</div>
+            <div class="text-sm text-gray-500 mt-1">Issues</div>
+          </div>
+          <div class="bg-bg-card border border-gray-800 rounded-lg p-4 text-center">
+            <div class="text-3xl font-bold text-accent-green" id="statQuality">-</div>
+            <div class="text-sm text-gray-500 mt-1">Quality Score</div>
+          </div>
+          <div class="bg-bg-card border border-gray-800 rounded-lg p-4 text-center">
+            <div class="text-3xl font-bold text-accent-yellow" id="statEffort">-</div>
+            <div class="text-sm text-gray-500 mt-1">Effort Score</div>
+          </div>
+        </div>
+
+        <!-- Developers Table (for TLs and Super Admin) -->
+        <div id="devAnalyticsSection" class="${isDev ? 'hidden' : ''} mb-6">
+          <h3 class="text-lg font-semibold text-white mb-3">Developer Activity</h3>
+          <div class="bg-bg-card border border-gray-800 rounded-lg overflow-hidden">
+            <table class="w-full text-left">
+              <thead class="bg-bg-dark border-b border-gray-800">
+                <tr>
+                  <th class="px-4 py-3 text-sm font-medium text-gray-400">Developer</th>
+                  <th class="px-4 py-3 text-sm font-medium text-gray-400 text-center">Commits</th>
+                  <th class="px-4 py-3 text-sm font-medium text-gray-400 text-center">Issues</th>
+                  <th class="px-4 py-3 text-sm font-medium text-gray-400 text-center">Quality</th>
+                  <th class="px-4 py-3 text-sm font-medium text-gray-400 text-center">Effort</th>
+                </tr>
+              </thead>
+              <tbody id="devAnalyticsTable">
+                <tr><td colspan="5" class="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Activity Chart Placeholder -->
+        <div class="bg-bg-card border border-gray-800 rounded-lg p-4">
+          <h3 class="text-lg font-semibold text-white mb-3">Activity Trend</h3>
+          <div id="activityChart" class="h-64 flex items-center justify-center text-gray-500">
+            <p>Chart visualization coming soon...</p>
+          </div>
+        </div>
+      `;
+
+      await fetchAnalyticsData();
+    }
+
+    function changeAnalyticsDays(days) {
+      analyticsDays = parseInt(days);
+      refreshAnalytics();
+    }
+
+    async function refreshAnalytics() {
+      await fetchAnalyticsData();
+    }
+
+    async function fetchAnalyticsData() {
+      try {
+        const url = currentRole === 'developer'
+          ? `/api/analytics?user_email=${currentUser.email}&days=${analyticsDays}`
+          : `/api/analytics?days=${analyticsDays}`;
+
+        const res = await fetch(url);
+        analyticsData = await res.json();
+
+        // Update summary cards
+        document.getElementById('statCommits').textContent = analyticsData.total_commits || 0;
+        document.getElementById('statIssues').textContent = analyticsData.total_issues || 0;
+        document.getElementById('statQuality').textContent = (analyticsData.avg_quality || 0) + '%';
+        document.getElementById('statEffort').textContent = analyticsData.avg_effort || 0;
+
+        // Update developers table (for TLs and Super Admin)
+        if (currentRole !== 'developer' && analyticsData.developers) {
+          const tbody = document.getElementById('devAnalyticsTable');
+          if (analyticsData.developers.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="px-4 py-8 text-center text-gray-500">No activity data available</td></tr>';
+          } else {
+            tbody.innerHTML = analyticsData.developers.map(dev => `
+              <tr class="border-b border-gray-800/50 hover:bg-bg-dark/50">
+                <td class="px-4 py-3">
+                  <div class="font-medium text-white">${dev.name}</div>
+                  <div class="text-xs text-gray-500 mono">${dev.email}</div>
+                </td>
+                <td class="px-4 py-3 text-center text-white">${dev.commits}</td>
+                <td class="px-4 py-3 text-center ${dev.issues > 0 ? 'text-accent-red' : 'text-gray-400'}">${dev.issues}</td>
+                <td class="px-4 py-3 text-center">
+                  <span class="severity-badge ${dev.quality_score >= 80 ? 'bg-accent-green/20 text-accent-green' : dev.quality_score >= 60 ? 'bg-accent-yellow/20 text-accent-yellow' : 'bg-accent-red/20 text-accent-red'}">
+                    ${dev.quality_score}%
+                  </span>
+                </td>
+                <td class="px-4 py-3 text-center text-white">${dev.effort_score}</td>
+              </tr>
+            `).join('');
+          }
+        }
+      } catch (e) {
+        console.error('Error fetching analytics:', e);
+      }
+    }
+
+    // ── My Projects View ─────────────────────────────────────────
+    async function loadMyProjectsView(panel) {
+      try {
+        const res = await fetch('/api/my-projects');
+        const projects = await res.json();
+
+        panel.innerHTML = `
+          <h2 class="text-xl font-bold text-white mb-6">My Projects</h2>
+          <div class="grid gap-4">
+            ${projects.length === 0 ? '<p class="text-gray-500">No projects assigned to you yet</p>' : ''}
+            ${projects.map(p => `
+              <div class="bg-bg-card border border-gray-800 rounded-lg p-4">
+                <div class="flex justify-between items-start">
+                  <div>
+                    <h3 class="font-semibold text-white">${p.name}</h3>
+                    <p class="text-sm text-gray-500 mono mt-1">${p.path}</p>
+                    <p class="text-xs text-gray-600 mt-1">Role: ${p.role_on_project}</p>
+                  </div>
+                  <button onclick="openProjectReview(${p.id}, '${p.path}')" class="px-3 py-1 text-sm bg-accent-blue text-white rounded hover:bg-blue-600">Review Code</button>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        `;
+      } catch (e) {
+        panel.innerHTML = `<div class="text-red-400">Error: ${e.message}</div>`;
+      }
+    }
+
+    // ── Developers View (TL) ─────────────────────────────────────
+    async function loadDevelopersView(panel) {
+      panel.innerHTML = `
+        <h2 class="text-xl font-bold text-white mb-6">My Developers</h2>
+        <div class="bg-bg-card border border-gray-800 rounded-lg p-6">
+          <p class="text-gray-500">Developers assigned to your projects will appear here.</p>
+        </div>
+      `;
+    }
+
+    // ── Settings View ────────────────────────────────────────────
+    async function loadSettingsView(panel) {
+      panel.innerHTML = `
+        <h2 class="text-xl font-bold text-white mb-6">Settings</h2>
+        <div class="bg-bg-card border border-gray-800 rounded-lg p-6">
+          <p class="text-gray-500">System settings coming soon...</p>
+        </div>
+      `;
+    }
+
+    // ── Open Project Review (Redirect to code review) ───────────
+    function openProjectReview(projectId, path) {
+      // In real implementation, this would open the code review view
+      alert('Opening code review for: ' + path);
+    }
+
+    // ── Show Add User Modal ─────────────────────────────────────
+    function showAddUserModal() {
+      const name = prompt('User Name:');
+      if (!name) return;
+      const email = prompt('User Email:');
+      if (!email) return;
+      const role = prompt('Role (admin/developer):', 'developer');
+      if (!role) return;
+
+      fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, email, role })
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          alert('User added successfully');
+          loadView('users');
+        } else {
+          alert(data.error || 'Failed to add user');
+        }
+      })
+      .catch(e => alert('Error: ' + e.message));
+    }
+
+    // ── Show Add Project Modal ───────────────────────────────────
+    function showAddProjectModal() {
+      const name = prompt('Project Name:');
+      if (!name) return;
+      const path = prompt('Project Path:');
+      if (!path) return;
+      const mainBranch = prompt('Main Branch:', 'main');
+
+      fetch('/api/projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, path, main_branch: mainBranch || 'main' })
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          alert('Project added successfully');
+          loadView('projects');
+        } else {
+          alert(data.error || 'Failed to add project');
+        }
+      })
+      .catch(e => alert('Error: ' + e.message));
+    }
+
+    // ── Initialize ─────────────────────────────────────────────────
+    checkFirstRun();
+  </script>
+</body>
+</html>

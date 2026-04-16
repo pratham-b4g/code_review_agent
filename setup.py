@@ -26,6 +26,9 @@ setup(
             "dashboard/static/*.html",
             "dashboard/static/*.css",
             "dashboard/static/*.js",
+            "config/*.py",
+            "analytics/*.py",
+            "utils/email_notifier.py",
         ],
     },
     include_package_data=True,
@@ -34,6 +37,7 @@ setup(
         "ruff>=0.1.0",
         "groq>=0.9.0",
         "requests>=2.31.0",
+        "psycopg2-binary>=2.9.0",
     ],
     extras_require={
         "dev": [
