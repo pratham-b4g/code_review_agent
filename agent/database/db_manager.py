@@ -6,7 +6,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 # Default local PostgreSQL (user will change to cloud URL)
-DEFAULT_DB_URL = "postgresql://postgres:root@localhost:5432/cra"
+DEFAULT_DB_URL = "postgresql://postgres:root@localhost:5432/postgres"
 
 # Super Admin credentials (user will edit these)
 SUPER_ADMIN_EMAIL = "admin@example.com"
