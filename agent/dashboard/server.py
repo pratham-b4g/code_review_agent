@@ -313,6 +313,38 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
+        # Scan project for code review
+        if path.startswith("/api/scan-project/"):
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            try:
+                project_id = int(path.split("/")[3])
+                db = _get_db()
+                
+                # Get project details
+                projects = db.get_all_projects()
+                project = next((p for p in projects if p["id"] == project_id), None)
+                
+                if not project:
+                    self._json_response({"error": "Project not found"}, 404)
+                    return
+                
+                # Check if user is assigned to this project
+                user_projects = db.get_user_projects(_current_user["email"])
+                if not any(up["id"] == project_id for up in user_projects):
+                    self._json_response({"error": "Not assigned to this project"}, 403)
+                    return
+                
+                # Run code review scan
+                project_path = project["path"]
+                result = self._scan_project(project_path, project_id, _current_user["email"])
+                self._json_response(result)
+                
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
         # Get access requests
         if path == "/api/access-requests":
             qs = parse_qs(parsed.query)
@@ -641,6 +673,96 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
+
+    def _scan_project(self, project_path: str, project_id: int, user_email: str) -> dict:
+        """Run a code review scan on a project and return results."""
+        try:
+            from agent.detector.language_detector import LanguageDetector
+            from agent.detector.framework_detector import FrameworkDetector
+            from agent.git.git_utils import scan_directory
+            from agent.utils.config_manager import ConfigManager
+            from agent.rules.rule_loader import RuleLoader
+            from agent.rules.rule_engine import RuleEngine
+            from agent.analyzer.cross_file_analyzer import (
+                detect_cross_file_duplicates,
+                detect_cross_file_constants,
+                detect_missing_test_files,
+                detect_architecture_issues,
+            )
+            from agent.analyzer.python_analyzer import PythonAnalyzer
+            from agent.analyzer.javascript_analyzer import JavaScriptAnalyzer
+            from agent.utils.reporter import ReviewResult
+            from datetime import date
+            
+            # Detect language and framework
+            config = ConfigManager()
+            lang = LanguageDetector(project_path).detect_primary_language()
+            fw = FrameworkDetector(project_path).detect()
+            
+            # Scan files
+            files = scan_directory(project_path, lang, list(config.exclude_paths))
+            
+            if not files:
+                return {
+                    "success": True,
+                    "project_name": project_path.split('/')[-1] or project_path.split('\\')[-1],
+                    "files": [],
+                    "violations": [],
+                    "summary": {"errors": 0, "warnings": 0, "infos": 0, "total": 0}
+                }
+            
+            # Load rules and run analysis
+            loader = RuleLoader()
+            rules = loader.load_rules(language=lang, framework=fw)
+            engine = RuleEngine(python_analyzer=PythonAnalyzer(), js_analyzer=JavaScriptAnalyzer())
+            result = engine.review_files(files, rules, config.max_file_size_bytes, config.exclude_paths)
+            
+            # Prepare file list
+            file_list = [{"name": f.split('/')[-1] or f.split('\\')[-1], "path": f} for f in files]
+            
+            # Prepare violations
+            violations = []
+            for v in result.violations:
+                violations.append({
+                    "file": v.file,
+                    "line": v.line,
+                    "severity": v.severity,
+                    "message": v.message,
+                    "rule_id": v.rule_id,
+                    "code_snippet": v.code_snippet if hasattr(v, 'code_snippet') else None
+                })
+            
+            # Update analytics with scan results
+            db = _get_db()
+            quality_score = max(0, 100 - len([v for v in violations if v["severity"] == "error"]) * 5 - len([v for v in violations if v["severity"] == "warning"]) * 2)
+            db.log_analytics(
+                user_email=user_email,
+                project_id=project_id,
+                date=date.today(),
+                commits=0,  # Not a commit, just a scan
+                issues=len(violations),
+                quality_score=quality_score,
+                effort_score=0
+            )
+            
+            return {
+                "success": True,
+                "project_name": project_path.split('/')[-1] or project_path.split('\\')[-1],
+                "language": lang,
+                "framework": fw,
+                "files": file_list,
+                "violations": violations,
+                "summary": {
+                    "errors": len([v for v in violations if v["severity"] == "error"]),
+                    "warnings": len([v for v in violations if v["severity"] == "warning"]),
+                    "infos": len([v for v in violations if v["severity"] == "info"]),
+                    "total": len(violations)
+                }
+            }
+            
+        except Exception as e:
+            print(f"[Scan Error] {e}")
+            return {"success": False, "error": str(e)}
 
     def _json_response(self, data: Any, status: int = 200):
         body = json.dumps(data, default=str).encode("utf-8")

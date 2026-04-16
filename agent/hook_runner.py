@@ -443,4 +443,73 @@ def _post_review_to_server(
 def run_as_hook() -> None:
     """Entry point called directly by the git pre-push hook script."""
     exit_code = run_review()
+    
+    # Track analytics for the push
+    try:
+        track_push_analytics()
+    except Exception:
+        pass  # Don't block push if analytics fails
+    
     sys.exit(exit_code)
+
+
+def track_push_analytics():
+    """Track git push analytics for the dashboard."""
+    import subprocess
+    from agent.database.db_manager import DatabaseManager
+    from agent.analytics.tracker import AnalyticsTracker
+    
+    # Get git info
+    try:
+        # Get repo path
+        result = subprocess.run(['git', 'rev-parse', '--show-toplevel'], 
+                               capture_output=True, text=True, check=True)
+        repo_path = result.stdout.strip()
+        
+        # Get user email from git config
+        result = subprocess.run(['git', 'config', 'user.email'],
+                               capture_output=True, text=True, check=True)
+        user_email = result.stdout.strip()
+        
+        # Get commits being pushed
+        result = subprocess.run(['git', 'log', 'HEAD@{1}..HEAD', '--oneline'],
+                               capture_output=True, text=True, cwd=repo_path)
+        commit_count = len([l for l in result.stdout.strip().split('\n') if l])
+        
+        if commit_count == 0:
+            return
+        
+        # Initialize DB and find project
+        db = DatabaseManager()
+        
+        # Try to find project by repo path or remote URL
+        projects = db.get_all_projects()
+        project_id = None
+        
+        for p in projects:
+            if repo_path in p.get('path', '') or p.get('path', '') in repo_path:
+                project_id = p['id']
+                break
+        
+        if not project_id:
+            return  # Project not registered in dashboard
+        
+        # Check if user is assigned to this project
+        user_projects = db.get_user_projects(user_email)
+        if not any(up['id'] == project_id for up in user_projects):
+            return  # User not assigned to this project
+        
+        # Log the activity
+        from datetime import date
+        db.log_analytics(
+            user_email=user_email,
+            project_id=project_id,
+            date=date.today(),
+            commits=commit_count,
+            issues=0,  # Will be updated by full scan
+            quality_score=100,
+            effort_score=commit_count * 10
+        )
+        
+    except Exception as e:
+        print(f"[Analytics] Failed to track: {e}")

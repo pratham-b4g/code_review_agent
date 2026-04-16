@@ -1036,10 +1036,173 @@
       }
     }
 
-    // ── Open Project Review (Redirect to code review) ───────────
-    function openProjectReview(projectId, path) {
-      // In real implementation, this would open the code review view
-      showNotification('Opening code review for: ' + path, 'info');
+    // ── Open Project Review ─────────────────────────────────────
+    async function openProjectReview(projectId, path) {
+      // Create a full-page review view
+      const panel = document.getElementById('contentPanel');
+      
+      // Show loading
+      panel.innerHTML = `
+        <div class="flex flex-col items-center justify-center h-full">
+          <div class="w-12 h-12 border-4 border-accent-blue border-t-transparent rounded-full animate-spin mb-4"></div>
+          <p class="text-gray-400">Scanning project for code issues...</p>
+        </div>
+      `;
+      
+      try {
+        // Call the scan API
+        const res = await fetch(`/api/scan-project/${projectId}?t=${Date.now()}`);
+        const result = await res.json();
+        
+        if (!result.success) {
+          panel.innerHTML = `<div class="text-red-400">Scan failed: ${result.error || 'Unknown error'}</div>`;
+          return;
+        }
+        
+        // Render the review results page
+        renderProjectReview(panel, result, projectId, path);
+        
+      } catch (e) {
+        panel.innerHTML = `<div class="text-red-400">Error scanning project: ${e.message}</div>`;
+      }
+    }
+
+    // ── Render Project Review Results ────────────────────────────
+    function renderProjectReview(panel, result, projectId, path) {
+      const stats = result.summary || { errors: 0, warnings: 0, infos: 0, total: 0 };
+      const files = result.files || [];
+      const violations = result.violations || [];
+      
+      // Group violations by file
+      const violationsByFile = {};
+      violations.forEach(v => {
+        if (!violationsByFile[v.file]) violationsByFile[v.file] = [];
+        violationsByFile[v.file].push(v);
+      });
+      
+      panel.innerHTML = `
+        <div class="fade-in">
+          <!-- Header -->
+          <div class="flex items-center justify-between mb-6">
+            <div>
+              <button onclick="loadView('my-projects')" class="text-gray-400 hover:text-white mb-2 flex items-center gap-1">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+                Back to Projects
+              </button>
+              <h2 class="text-xl font-bold text-white">Code Review: ${result.project_name || 'Project'}</h2>
+              <p class="text-sm text-gray-500 mono mt-1">${path}</p>
+            </div>
+            <button onclick="openProjectReview(${projectId}, '${path}')" class="px-4 py-2 bg-accent-blue text-white rounded-lg hover:bg-blue-600 transition">
+              Rescan
+            </button>
+          </div>
+          
+          <!-- Stats Cards -->
+          <div class="grid grid-cols-4 gap-4 mb-6">
+            <div class="bg-bg-card border border-gray-800 rounded-lg p-4 text-center cursor-pointer hover:border-accent-red transition" onclick="filterBySeverity('error')">
+              <div class="text-3xl font-bold text-accent-red">${stats.errors}</div>
+              <div class="text-sm text-gray-500 mt-1">Errors</div>
+            </div>
+            <div class="bg-bg-card border border-gray-800 rounded-lg p-4 text-center cursor-pointer hover:border-accent-yellow transition" onclick="filterBySeverity('warning')">
+              <div class="text-3xl font-bold text-accent-yellow">${stats.warnings}</div>
+              <div class="text-sm text-gray-500 mt-1">Warnings</div>
+            </div>
+            <div class="bg-bg-card border border-gray-800 rounded-lg p-4 text-center cursor-pointer hover:border-accent-blue transition" onclick="filterBySeverity('info')">
+              <div class="text-3xl font-bold text-accent-blue">${stats.infos}</div>
+              <div class="text-sm text-gray-500 mt-1">Info</div>
+            </div>
+            <div class="bg-bg-card border border-gray-800 rounded-lg p-4 text-center">
+              <div class="text-3xl font-bold text-white">${files.length}</div>
+              <div class="text-sm text-gray-500 mt-1">Files</div>
+            </div>
+          </div>
+          
+          <!-- Main Content -->
+          <div class="grid grid-cols-3 gap-6">
+            <!-- File List -->
+            <div class="col-span-1 bg-bg-card border border-gray-800 rounded-lg overflow-hidden max-h-[600px] overflow-y-auto">
+              <div class="p-3 border-b border-gray-800 bg-bg-dark">
+                <h3 class="font-semibold text-white">Files (${files.length})</h3>
+              </div>
+              <div class="divide-y divide-gray-800">
+                ${files.map(f => {
+                  const fileViolations = violationsByFile[f.path] || [];
+                  const errorCount = fileViolations.filter(v => v.severity === 'error').length;
+                  const warnCount = fileViolations.filter(v => v.severity === 'warning').length;
+                  return `
+                    <div class="p-3 hover:bg-bg-dark cursor-pointer ${selectedFile === f.path ? 'bg-bg-dark border-l-2 border-accent-blue' : ''}" 
+                         onclick="showFileViolations('${f.path}', ${JSON.stringify(fileViolations).replace(/"/g, '&quot;')})">
+                      <div class="flex items-center justify-between">
+                        <span class="text-sm text-white truncate">${f.name}</span>
+                        <div class="flex gap-2">
+                          ${errorCount > 0 ? `<span class="text-xs bg-accent-red/20 text-accent-red px-2 py-0.5 rounded">${errorCount}</span>` : ''}
+                          ${warnCount > 0 ? `<span class="text-xs bg-accent-yellow/20 text-accent-yellow px-2 py-0.5 rounded">${warnCount}</span>` : ''}
+                        </div>
+                      </div>
+                      <div class="text-xs text-gray-500 mono mt-1 truncate">${f.path}</div>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            </div>
+            
+            <!-- Violations Detail -->
+            <div class="col-span-2 bg-bg-card border border-gray-800 rounded-lg overflow-hidden">
+              <div class="p-3 border-b border-gray-800 bg-bg-dark">
+                <h3 class="font-semibold text-white">Issues</h3>
+              </div>
+              <div id="violationsPanel" class="p-4 max-h-[600px] overflow-y-auto">
+                <p class="text-gray-500 text-center py-8">Select a file to view issues</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+      
+      // Store violations for file selection
+      window.currentViolations = violationsByFile;
+    }
+
+    let selectedFile = null;
+
+    function showFileViolations(filePath, violations) {
+      selectedFile = filePath;
+      const panel = document.getElementById('violationsPanel');
+      
+      if (!violations || violations.length === 0) {
+        panel.innerHTML = `
+          <div class="text-center py-8">
+            <div class="text-accent-green text-5xl mb-4">✓</div>
+            <p class="text-gray-400">No issues found in this file!</p>
+          </div>
+        `;
+        return;
+      }
+      
+      panel.innerHTML = `
+        <div class="mb-4 pb-3 border-b border-gray-800">
+          <h4 class="text-white font-medium">${filePath.split('/').pop()}</h4>
+          <p class="text-xs text-gray-500 mono">${filePath}</p>
+        </div>
+        <div class="space-y-3">
+          ${violations.map(v => `
+            <div class="p-3 rounded-lg ${v.severity === 'error' ? 'bg-accent-red/10 border border-accent-red/30' : v.severity === 'warning' ? 'bg-accent-yellow/10 border border-accent-yellow/30' : 'bg-accent-blue/10 border border-accent-blue/30'}">
+              <div class="flex items-start gap-2">
+                <span class="text-xs font-bold uppercase px-2 py-0.5 rounded ${v.severity === 'error' ? 'bg-accent-red text-white' : v.severity === 'warning' ? 'bg-accent-yellow text-black' : 'bg-accent-blue text-white'}">${v.severity}</span>
+                <span class="text-xs text-gray-400">Line ${v.line}</span>
+              </div>
+              <p class="text-white text-sm mt-2">${v.message}</p>
+              <p class="text-gray-500 text-xs mt-1">Rule: ${v.rule_id || 'N/A'}</p>
+              ${v.code_snippet ? `<pre class="mt-2 p-2 bg-bg-dark rounded text-xs mono text-gray-400 overflow-x-auto">${v.code_snippet}</pre>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    function filterBySeverity(severity) {
+      // Implementation to filter violations by severity
+      showNotification(`Filtering by ${severity}...`, 'info');
     }
 
     // ── Show Add User Modal ─────────────────────────────────────
