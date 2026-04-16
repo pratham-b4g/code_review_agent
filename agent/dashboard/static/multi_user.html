@@ -98,11 +98,15 @@
         </div>
         <div id="devLoginForm">
           <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-400 mb-2">Git Email</label>
-            <input type="email" id="devEmail" class="w-full bg-bg-dark border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-accent-blue" placeholder="your@email.com" />
-            <p class="text-xs text-gray-500 mt-1">This should match your git config user.email</p>
+            <label class="block text-sm font-medium text-gray-400 mb-2">Your Git Email (Auto-detected)</label>
+            <input type="email" id="devEmail" readonly class="w-full bg-bg-dark/50 border border-gray-700 rounded-lg px-4 py-3 text-white/70 cursor-not-allowed" placeholder="Auto-detecting from git config..." />
+            <p class="text-xs text-gray-500 mt-1">Email is automatically detected from your git config. Cannot be changed.</p>
           </div>
-          <button onclick="developerLogin()" class="w-full bg-accent-blue text-white font-semibold py-3 rounded-lg hover:bg-blue-600 transition">
+          <div id="devLoading" class="hidden text-center py-2">
+            <div class="inline-block w-5 h-5 border-2 border-accent-blue border-t-transparent rounded-full animate-spin"></div>
+            <span class="ml-2 text-sm text-gray-400">Checking access...</span>
+          </div>
+          <button id="devLoginBtn" onclick="developerLogin()" class="w-full bg-accent-blue text-white font-semibold py-3 rounded-lg hover:bg-blue-600 transition hidden">
             Access Dashboard
           </button>
         </div>
@@ -930,19 +934,85 @@
       }
     }
 
+    // ── Get Git Email ───────────────────────────────────────────
+    async function getGitEmail() {
+      try {
+        const res = await fetch('/api/git-email');
+        const data = await res.json();
+        return data.email || '';
+      } catch (e) {
+        console.error('Failed to get git email:', e);
+        return '';
+      }
+    }
+
     // ── Check Mode and Initialize ─────────────────────────────────
     async function initLogin() {
       try {
         const res = await fetch('/api/mode');
         const data = await res.json();
+        
         if (data.mode === 'admin') {
-          // For admin mode, hide developer tab and show only super admin
-          switchLoginTab('admin');
-          // Optionally hide the developer tab completely
+          // For admin mode: hide developer tab, show only super admin
           document.querySelector('[data-tab="developer"]').style.display = 'none';
+          switchLoginTab('admin');
+        } else {
+          // For developer mode: hide super admin tab, auto-login with git email
+          document.querySelector('[data-tab="admin"]').style.display = 'none';
+          
+          // Auto-detect git email and try to login
+          document.getElementById('devLoading').classList.remove('hidden');
+          const gitEmail = await getGitEmail();
+          
+          if (gitEmail) {
+            document.getElementById('devEmail').value = gitEmail;
+            // Try auto-login
+            await attemptAutoLogin(gitEmail);
+          } else {
+            // No git email found - show manual button as fallback
+            document.getElementById('devLoading').classList.add('hidden');
+            document.getElementById('devLoginBtn').classList.remove('hidden');
+            showNotification('Could not detect git email. Please configure git user.email', 'warning');
+          }
         }
       } catch (e) {
         console.error('Failed to get mode:', e);
+      }
+    }
+
+    // ── Attempt Auto Login ─────────────────────────────────────
+    async function attemptAutoLogin(email) {
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, mode: 'developer' })
+        });
+        const data = await res.json();
+        
+        document.getElementById('devLoading').classList.add('hidden');
+        
+        if (data.success) {
+          // User exists - auto login
+          currentUser = data.user;
+          currentRole = data.user.role;
+          closeLoginModal();
+          initDashboard();
+        } else if (data.not_registered) {
+          // Show not registered message with request option
+          document.getElementById('devLoginForm').classList.add('hidden');
+          document.getElementById('devNotRegistered').classList.remove('hidden');
+          await loadTLs();
+        } else {
+          // Other error - show login button for manual retry
+          document.getElementById('devLoginBtn').classList.remove('hidden');
+          showNotification(data.error || 'Login failed', 'error');
+        }
+      } catch (e) {
+        document.getElementById('devLoading').classList.add('hidden');
+        document.getElementById('devLoginBtn').classList.remove('hidden');
+        console.error('Auto-login failed:', e);
+        showNotification('Login error: ' + e.message, 'error');
       }
     }
 

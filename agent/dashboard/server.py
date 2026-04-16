@@ -209,6 +209,22 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._json_response({"mode": _mode})
             return
 
+        # Get git email from system
+        if path == "/api/git-email":
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["git", "config", "user.email"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                email = result.stdout.strip() if result.returncode == 0 else ""
+                self._json_response({"email": email})
+            except Exception:
+                self._json_response({"email": ""})
+            return
+
         # Get all TLs (for access request dropdown)
         if path == "/api/users/tls":
             try:

@@ -172,13 +172,18 @@ class DatabaseManager:
 
     def get_all_users(self, role: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all users, optionally filtered by role."""
-        with self.connect() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                if role:
-                    cur.execute("SELECT * FROM users WHERE role = %s ORDER BY created_at DESC", (role,))
-                else:
-                    cur.execute("SELECT * FROM users ORDER BY created_at DESC")
-                return [dict(row) for row in cur.fetchall()]
+        try:
+            with self.connect() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    if role:
+                        cur.execute("SELECT * FROM users WHERE role = %s ORDER BY created_at DESC", (role,))
+                    else:
+                        cur.execute("SELECT * FROM users ORDER BY created_at DESC")
+                    result = cur.fetchall()
+                    return [dict(row) for row in result] if result else []
+        except Exception as e:
+            print(f"[DB Error] get_all_users: {e}")
+            return []
 
     def create_project(self, name: str, path: str, main_branch: str, created_by: int) -> Optional[int]:
         """Create a new project."""
