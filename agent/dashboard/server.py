@@ -284,11 +284,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"name": ""})
             return
 
-        # Get all TLs (for access request dropdown)
+        # Get all TLs (for access request dropdown - allowed unauthenticated for request access flow)
         if path == "/api/users/tls":
             try:
                 db = _get_db()
                 tls = db.get_all_users(role='admin')
+                # Only expose minimal info (name + email) for the dropdown
                 self._json_response([{"email": u["email"], "name": u["name"]} for u in tls])
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
@@ -296,6 +297,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         # Get all users (super admin only)
         if path == "/api/users":
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            if _current_user.get("role") != "super_admin":
+                self._json_response({"error": "Forbidden: super admin only"}, 403)
+                return
             try:
                 db = _get_db()
                 users = db.get_all_users()
@@ -304,8 +311,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
-        # Get all projects
+        # Get all projects (authenticated users only; super admin sees all)
         if path == "/api/projects":
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
             try:
                 db = _get_db()
                 projects = db.get_all_projects()
@@ -327,8 +337,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
-        # Get project assignments (for super admin and TLs)
+        # Get project assignments (super admin and TLs only)
         if path.startswith("/api/projects/") and path.endswith("/assignments"):
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            if _current_user.get("role") not in ("super_admin", "admin"):
+                self._json_response({"error": "Forbidden: admin access required"}, 403)
+                return
             try:
                 project_id = int(path.split("/")[3])
                 db = _get_db()
@@ -338,18 +354,23 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
-        # Get user's project assignments
+        # Get user's project assignments (authenticated, super admin/admin or self only)
         if path == "/api/user-project-assignments":
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
             qs = parse_qs(parsed.query)
             user_email = qs.get("user_email", [None])[0]
             if not user_email:
                 self._json_response({"error": "user_email required"}, 400)
                 return
+            # Developers can only query their own assignments
+            if _current_user.get("role") == "developer" and user_email != _current_user.get("email"):
+                self._json_response({"error": "Forbidden: can only view own assignments"}, 403)
+                return
             try:
                 db = _get_db()
-                # Get projects assigned to this user
                 projects = db.get_user_projects(user_email)
-                # Return as assignment objects
                 assignments = [{"project_id": p["id"], "user_email": user_email, "role_on_project": p.get("role_on_project", "developer")} for p in projects]
                 self._json_response(assignments)
             except Exception as e:
@@ -506,10 +527,19 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
-        # Get access requests
+        # Get access requests (authenticated: super admin sees all, TL sees own)
         if path == "/api/access-requests":
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            if _current_user.get("role") not in ("super_admin", "admin"):
+                self._json_response({"error": "Forbidden: admin access required"}, 403)
+                return
             qs = parse_qs(parsed.query)
             tl_email = qs.get("tl_email", [None])[0]
+            # TLs can only see requests addressed to them
+            if _current_user.get("role") == "admin":
+                tl_email = _current_user.get("email")
             try:
                 db = _get_db()
                 requests = db.get_pending_access_requests(tl_email)
@@ -518,13 +548,19 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
-        # Get analytics data
+        # Get analytics data (authenticated users only)
         if path == "/api/analytics":
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
             qs = parse_qs(parsed.query)
             user_email = qs.get("user_email", [None])[0]
             project_id = qs.get("project_id", [None])[0]
             days = int(qs.get("days", ["7"])[0])
             branch = qs.get("branch", [None])[0]  # None means all branches
+            # Developers can only view their own analytics
+            if _current_user.get("role") == "developer":
+                user_email = _current_user.get("email")
 
             # If project_id is provided, convert to int
             if project_id:
@@ -547,12 +583,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
-        # Get detailed analytics (time series data)
+        # Get detailed analytics (time series data) - authenticated only
         if path == "/api/analytics/detail":
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
             qs = parse_qs(parsed.query)
             user_email = qs.get("user_email", [None])[0]
             project_id = qs.get("project_id", [None])[0]
             days = int(qs.get("days", ["30"])[0])
+            # Developers can only view their own analytics
+            if _current_user.get("role") == "developer":
+                user_email = _current_user.get("email")
 
             if project_id:
                 try:
@@ -683,8 +725,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
-        # Respond to access request
+        # Respond to access request (authenticated super_admin or the TL the request is addressed to)
         if path.startswith("/api/access-requests/") and path.endswith("/respond"):
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            if _current_user.get("role") not in ("super_admin", "admin"):
+                self._json_response({"error": "Forbidden: admin access required"}, 403)
+                return
             try:
                 request_id = int(path.split("/")[3])
                 db = _get_db()
@@ -697,10 +745,25 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         request_details = r
                         break
 
+                # TLs can only respond to requests addressed to them
+                if request_details and _current_user.get("role") == "admin":
+                    if request_details.get("tl_email") != _current_user.get("email"):
+                        self._json_response({"error": "Forbidden: this request is not addressed to you"}, 403)
+                        return
+
+                # Use server-side user id, NOT the client-supplied responded_by
+                responded_by = _current_user.get("id")
+
+                # Validate status value
+                req_status = data.get("status")
+                if req_status not in ("approved", "rejected"):
+                    self._json_response({"error": "Invalid status. Must be 'approved' or 'rejected'"}, 400)
+                    return
+
                 success = db.respond_to_access_request(
                     request_id,
-                    data.get("status"),
-                    data.get("responded_by")
+                    req_status,
+                    responded_by
                 )
 
                 # Send email notification to developer
@@ -741,10 +804,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
-        # Create project (super admin or TL)
+        # Create project (super admin or TL only)
         if path == "/api/projects":
             if not _current_user:
                 self._json_response({"error": "Unauthorized"}, 401)
+                return
+            if _current_user.get("role") not in ("super_admin", "admin"):
+                self._json_response({"error": "Forbidden: only admins can create projects"}, 403)
                 return
             try:
                 db = _get_db()
@@ -759,10 +825,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
-        # Assign user to project
+        # Assign user to project (super admin or TL only)
         if path == "/api/project-assignments":
             if not _current_user:
                 self._json_response({"error": "Unauthorized"}, 401)
+                return
+            if _current_user.get("role") not in ("super_admin", "admin"):
+                self._json_response({"error": "Forbidden: only admins can assign users"}, 403)
                 return
             try:
                 db = _get_db()
@@ -807,10 +876,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
-        # Remove user from project assignment
+        # Remove user from project assignment (super admin or TL only)
         if path.startswith("/api/project-assignments/"):
             if not _current_user:
                 self._json_response({"error": "Unauthorized"}, 401)
+                return
+            if _current_user.get("role") not in ("super_admin", "admin"):
+                self._json_response({"error": "Forbidden: only admins can remove assignments"}, 403)
                 return
             try:
                 # Parse project_id and user_email from URL: /api/project-assignments/{project_id}/{user_email}
