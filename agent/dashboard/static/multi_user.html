@@ -1409,8 +1409,8 @@
                 <button class="filter-btn px-2 py-1 text-xs rounded ${severityFilter === 'info' ? 'bg-accent-blue/20 text-accent-blue' : 'text-gray-400 hover:text-white'}" onclick="setFilter('info')">Info</button>
               </div>
               
-              <!-- File Tree -->
-              <div class="flex-1 overflow-y-auto p-2" id="fileTree">
+              <!-- File List -->
+              <div class="flex-1 overflow-y-auto" id="fileTree">
                 ${renderFileTree(fileTree)}
               </div>
               
@@ -1537,84 +1537,101 @@
       return tree;
     }
 
-    function renderFileTree(node, level = 0) {
-      if (node.type === 'root') {
-        let html = '';
+    function renderFileTree(node) {
+      // Flat file list (like index.html sidebar) instead of nested tree
+      let html = '';
 
-        // Show orphaned (project-level) violations at the top
-        const orphaned = node.orphanedViolations || [];
-        const filteredOrphans = severityFilter === 'all'
-          ? orphaned
-          : orphaned.filter(v => v.severity === severityFilter);
+      // Show orphaned (project-level) violations at the top
+      const orphaned = node.orphanedViolations || [];
+      const filteredOrphans = severityFilter === 'all'
+        ? orphaned
+        : orphaned.filter(v => v.severity === severityFilter);
 
-        if (filteredOrphans.length > 0) {
-          const oErrors = filteredOrphans.filter(v => v.severity === 'error').length;
-          const oWarnings = filteredOrphans.filter(v => v.severity === 'warning').length;
-          const oInfos = filteredOrphans.filter(v => v.severity === 'info').length;
-          html += `
-            <div class="sidebar-item px-2 py-1.5 cursor-pointer rounded hover:bg-bg-dark text-sm ${currentFile === '__project__' ? 'bg-bg-dark border-l-2 border-accent-blue' : ''}"
-                 onclick="showProjectIssues()">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-1 truncate">
-                  <span class="text-accent-purple">&#9881;</span>
-                  <span class="text-gray-300 font-medium truncate">Project Issues</span>
-                </div>
-                <div class="flex gap-1 shrink-0">
-                  ${oErrors > 0 ? `<span class="text-xs bg-accent-red/20 text-accent-red px-1.5 rounded">${oErrors}</span>` : ''}
-                  ${oWarnings > 0 ? `<span class="text-xs bg-accent-yellow/20 text-accent-yellow px-1.5 rounded">${oWarnings}</span>` : ''}
-                  ${oInfos > 0 ? `<span class="text-xs bg-accent-blue/20 text-accent-blue px-1.5 rounded">${oInfos}</span>` : ''}
-                </div>
+      if (filteredOrphans.length > 0) {
+        const oErrors = filteredOrphans.filter(v => v.severity === 'error').length;
+        const oWarnings = filteredOrphans.filter(v => v.severity === 'warning').length;
+        const oInfos = filteredOrphans.filter(v => v.severity === 'info').length;
+        html += `
+          <div class="sidebar-item px-4 py-2.5 cursor-pointer border-b border-gray-800/50 ${currentFile === '__project__' ? 'active' : ''}"
+               onclick="showProjectIssues()">
+            <div class="flex items-center justify-between">
+              <span class="text-sm text-gray-200 font-medium">Project Issues</span>
+              <div class="flex gap-1 shrink-0">
+                ${oErrors > 0 ? `<span class="severity-badge bg-accent-red/20 text-accent-red">${oErrors}</span>` : ''}
+                ${oWarnings > 0 ? `<span class="severity-badge bg-accent-yellow/20 text-accent-yellow">${oWarnings}</span>` : ''}
+                ${oInfos > 0 ? `<span class="severity-badge bg-accent-blue/20 text-accent-blue">${oInfos}</span>` : ''}
               </div>
             </div>
-            <div class="border-b border-gray-800 my-1"></div>
-          `;
-        }
-
-        html += Object.values(node.children).map(child => renderFileTree(child, 0)).join('');
-        return html;
-      }
-      
-      const indent = level * 12;
-      const hasViolations = node.violations && node.violations.length > 0;
-      const errors = hasViolations ? node.violations.filter(v => v.severity === 'error').length : 0;
-      const warnings = hasViolations ? node.violations.filter(v => v.severity === 'warning').length : 0;
-      const infos = hasViolations ? node.violations.filter(v => v.severity === 'info').length : 0;
-      
-      if (node.type === 'folder') {
-        return `
-          <div class="folder-group">
-            <div class="px-2 py-1 text-gray-400 text-sm" style="padding-left: ${indent + 8}px">
-              <span class="text-accent-yellow">📁</span> ${node.name}
-            </div>
-            ${Object.values(node.children).map(child => renderFileTree(child, level + 1)).join('')}
           </div>
         `;
       }
-      
-      // File
-      const matchesFilter = severityFilter === 'all' || 
-        (hasViolations && node.violations.some(v => v.severity === severityFilter));
-      
-      // Hide file if it doesn't match the filter (or has no violations when filtering)
-      if (!matchesFilter) return '';
-      
-      return `
-        <div class="sidebar-item px-2 py-1.5 cursor-pointer rounded hover:bg-bg-dark text-sm ${currentFile === node.fullPath ? 'bg-bg-dark border-l-2 border-accent-blue' : ''}" 
-             style="padding-left: ${indent + 8}px"
-             onclick="selectReviewFile('${node.fullPath.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')">
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-1 truncate">
-              <span class="text-gray-500">📄</span>
-              <span class="text-gray-300 truncate">${node.name}</span>
-            </div>
-            <div class="flex gap-1 shrink-0">
-              ${errors > 0 ? `<span class="text-xs bg-accent-red/20 text-accent-red px-1.5 rounded">${errors}</span>` : ''}
-              ${warnings > 0 ? `<span class="text-xs bg-accent-yellow/20 text-accent-yellow px-1.5 rounded">${warnings}</span>` : ''}
-              ${infos > 0 ? `<span class="text-xs bg-accent-blue/20 text-accent-blue px-1.5 rounded">${infos}</span>` : ''}
+
+      // Collect all files with their violations into a flat list
+      const fileEntries = [];
+      function collectFiles(n) {
+        if (n.type === 'file') {
+          fileEntries.push(n);
+        } else if (n.children) {
+          Object.values(n.children).forEach(child => collectFiles(child));
+        }
+      }
+      collectFiles(node);
+
+      // Sort: files with most errors first, then by total violations
+      fileEntries.sort((a, b) => {
+        const aErr = a.violations.filter(v => v.severity === 'error').length;
+        const bErr = b.violations.filter(v => v.severity === 'error').length;
+        if (bErr !== aErr) return bErr - aErr;
+        return b.violations.length - a.violations.length;
+      });
+
+      // Render flat file list
+      for (const file of fileEntries) {
+        const violations = file.violations || [];
+        const hasViolations = violations.length > 0;
+        const errors = hasViolations ? violations.filter(v => v.severity === 'error').length : 0;
+        const warnings = hasViolations ? violations.filter(v => v.severity === 'warning').length : 0;
+        const infos = hasViolations ? violations.filter(v => v.severity === 'info').length : 0;
+
+        // Apply severity filter
+        const matchesFilter = severityFilter === 'all' ||
+          (hasViolations && violations.some(v => v.severity === severityFilter));
+        if (!matchesFilter) continue;
+
+        // Split path into directory + filename
+        const fullPath = file.path || file.fullPath || '';
+        const parts = fullPath.split('/');
+        const fileName = parts.pop();
+        const dir = parts.join('/');
+        const isActive = currentFile === file.fullPath;
+
+        html += `
+          <div class="sidebar-item px-4 py-2.5 cursor-pointer border-b border-gray-800/50 ${isActive ? 'active' : ''}"
+               onclick="selectReviewFile('${file.fullPath.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')">
+            <div class="flex items-center justify-between">
+              <div class="truncate pr-2">
+                ${dir ? `<span class="text-gray-600 text-xs">${dir}/</span><br/>` : ''}
+                <span class="text-sm text-gray-200">${fileName}</span>
+              </div>
+              <div class="flex gap-1 shrink-0">
+                ${errors > 0 ? `<span class="severity-badge bg-accent-red/20 text-accent-red">${errors}</span>` : ''}
+                ${warnings > 0 ? `<span class="severity-badge bg-accent-yellow/20 text-accent-yellow">${warnings}</span>` : ''}
+                ${infos > 0 ? `<span class="severity-badge bg-accent-blue/20 text-accent-blue">${infos}</span>` : ''}
+              </div>
             </div>
           </div>
-        </div>
-      `;
+        `;
+      }
+
+      if (!html) {
+        html = `
+          <div class="p-6 text-center">
+            <div class="text-accent-green text-3xl mb-2">&#10003;</div>
+            <div class="text-sm text-gray-400">${severityFilter === 'all' ? 'No issues found!' : 'No ' + severityFilter + ' issues'}</div>
+          </div>`;
+      }
+
+      return html;
     }
 
     function setFilter(filter) {
@@ -1791,11 +1808,10 @@
       document.getElementById('codeContent').classList.remove('hidden');
       document.getElementById('codeContent').classList.add('flex');
 
-      // Update sidebar selection
-      document.getElementById('fileTree').innerHTML = renderFileTree(buildFileTree(currentReviewData.files, currentReviewData.violations));
-
-      // Collect orphaned violations
+      // Build tree once, update sidebar and collect orphans
       const fileTree = buildFileTree(currentReviewData.files, currentReviewData.violations);
+      document.getElementById('fileTree').innerHTML = renderFileTree(fileTree);
+
       const orphaned = fileTree.orphanedViolations || [];
       const filtered = severityFilter === 'all' ? orphaned : orphaned.filter(v => v.severity === severityFilter);
 

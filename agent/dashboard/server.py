@@ -1034,12 +1034,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         
         return violations
 
-    def _scan_project(self, project_path: str, project_id: int, user_email: str) -> dict:
-        """Run a code review scan on a project and return results."""
+    def _scan_project(self, project_path: str, project_id: int, user_email: str, strip_base: str = None) -> dict:
+        """Run a code review scan on a project and return results.
+
+        Args:
+            strip_base: If provided, strip this directory prefix from all file
+                        paths in the response (used when called from branch scan
+                        with an external temp directory).
+        """
         import tempfile
         import shutil
         import subprocess
-        
+
         temp_dir = None
         scan_path = project_path
         
@@ -1148,13 +1154,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             print(f"[Scan] After dedup: {len(result.violations)} total violations")
             
             # Calculate relative paths to hide temp directory
+            # Use strip_base (from branch scan) or temp_dir (from URL clone) or scan_path
+            base_to_strip = strip_base or temp_dir or scan_path
+
             def make_relative(path):
-                import os
-                # Normalize path separators for comparison
                 norm_path = path.replace('\\', '/')
-                norm_temp = temp_dir.replace('\\', '/') if temp_dir else ""
-                if norm_temp and norm_path.startswith(norm_temp):
-                    return norm_path[len(norm_temp):].lstrip('/')
+                norm_base = base_to_strip.replace('\\', '/').rstrip('/') + '/' if base_to_strip else ""
+                if norm_base and norm_path.startswith(norm_base):
+                    return norm_path[len(norm_base):]
+                # Also try without trailing slash
+                norm_base2 = norm_base.rstrip('/')
+                if norm_base2 and norm_path.startswith(norm_base2):
+                    return norm_path[len(norm_base2):].lstrip('/')
                 return path.replace('\\', '/')
             
             # Prepare file list with relative paths
@@ -1297,7 +1308,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return {"success": False, "error": f"Project path does not exist: {project_path}"}
             
             # Use the existing _scan_project logic but with the branch-specific path
-            result = self._scan_project(scan_path, project_id, user_email)
+            # Pass temp_dir as strip_base so file paths are properly relativized
+            result = self._scan_project(scan_path, project_id, user_email, strip_base=temp_dir or scan_path)
             
             # Add branch info to result
             if isinstance(result, dict) and result.get("success"):
