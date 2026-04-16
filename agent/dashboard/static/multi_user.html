@@ -1269,8 +1269,49 @@
         // Render the review results page
         renderProjectReview(panel, result, projectId, path);
         
+        // Fetch branches from Git
+        fetchProjectBranches(projectId);
+        
       } catch (e) {
         panel.innerHTML = `<div class="text-red-400">Error scanning project: ${e.message}</div>`;
+      }
+    }
+
+    // ── Fetch Project Branches from Git ────────────────────────
+    async function fetchProjectBranches(projectId) {
+      try {
+        const res = await fetch(`/api/projects/${projectId}/branches?t=${Date.now()}`);
+        const data = await res.json();
+        
+        const select = document.getElementById('reviewBranch');
+        if (!select) return;
+        
+        if (data.error) {
+          select.innerHTML = '<option value="main" selected>main</option>';
+          return;
+        }
+        
+        const branches = data.branches || ['main'];
+        const role = data.role || 'developer';
+        
+        // Build options
+        select.innerHTML = branches.map(branch => 
+          `<option value="${branch}" ${branch === 'main' ? 'selected' : ''}>${branch}</option>`
+        ).join('');
+        
+        // Add a note if filtered
+        if (data.filtered) {
+          select.title = 'Showing only your branches (Developer view)';
+        } else if (role === 'admin' || role === 'super_admin') {
+          select.title = 'All branches (TL/Admin view)';
+        }
+        
+      } catch (e) {
+        console.error('Error fetching branches:', e);
+        const select = document.getElementById('reviewBranch');
+        if (select) {
+          select.innerHTML = '<option value="main" selected>main</option><option value="develop">develop</option>';
+        }
       }
     }
 
@@ -1295,6 +1336,13 @@
         window.currentViolations[v.file].push(v);
       });
       
+      // Debug logging
+      console.log('[CodeReview] Violations received:', violations.length);
+      console.log('[CodeReview] Errors:', violations.filter(v => v.severity === 'error').length);
+      console.log('[CodeReview] Warnings:', violations.filter(v => v.severity === 'warning').length);
+      console.log('[CodeReview] Infos:', violations.filter(v => v.severity === 'info').length);
+      console.log('[CodeReview] Sample violations:', violations.slice(0, 3));
+      
       panel.innerHTML = `
         <div class="fade-in h-full flex flex-col">
           <!-- Header -->
@@ -1311,12 +1359,8 @@
               <!-- Branch Selector -->
               <div class="flex items-center gap-2">
                 <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>
-                <select id="reviewBranch" onchange="switchReviewBranch(this.value, ${projectId}, '${path}')" class="bg-bg-dark border border-gray-700 text-white rounded-lg px-3 py-1.5 text-sm">
-                  <option value="main" selected>main</option>
-                  <option value="develop">develop</option>
-                  <option value="feature/auth">feature/auth</option>
-                  <option value="feature/ui">feature/ui</option>
-                  <option value="bugfix/login">bugfix/login</option>
+                <select id="reviewBranch" onchange="switchReviewBranch(this.value, ${projectId}, '${path}')" class="bg-bg-dark border border-gray-700 text-white rounded-lg px-3 py-1.5 text-sm min-w-[150px]">
+                  <option value="" disabled selected>Loading branches...</option>
                 </select>
               </div>
               <button onclick="openProjectReview(${projectId}, '${path}')" class="px-4 py-2 bg-accent-blue text-white rounded-lg hover:bg-blue-600 transition text-sm">
@@ -1446,6 +1490,7 @@
       const hasViolations = node.violations && node.violations.length > 0;
       const errors = hasViolations ? node.violations.filter(v => v.severity === 'error').length : 0;
       const warnings = hasViolations ? node.violations.filter(v => v.severity === 'warning').length : 0;
+      const infos = hasViolations ? node.violations.filter(v => v.severity === 'info').length : 0;
       
       if (node.type === 'folder') {
         return `
@@ -1462,7 +1507,8 @@
       const matchesFilter = severityFilter === 'all' || 
         (hasViolations && node.violations.some(v => v.severity === severityFilter));
       
-      if (!matchesFilter && hasViolations) return '';
+      // Hide file if it doesn't match the filter (or has no violations when filtering)
+      if (!matchesFilter) return '';
       
       return `
         <div class="sidebar-item px-2 py-1.5 cursor-pointer rounded hover:bg-bg-dark text-sm ${currentFile === node.fullPath ? 'bg-bg-dark border-l-2 border-accent-blue' : ''}" 
@@ -1476,6 +1522,7 @@
             <div class="flex gap-1 shrink-0">
               ${errors > 0 ? `<span class="text-xs bg-accent-red/20 text-accent-red px-1.5 rounded">${errors}</span>` : ''}
               ${warnings > 0 ? `<span class="text-xs bg-accent-yellow/20 text-accent-yellow px-1.5 rounded">${warnings}</span>` : ''}
+              ${infos > 0 ? `<span class="text-xs bg-accent-blue/20 text-accent-blue px-1.5 rounded">${infos}</span>` : ''}
             </div>
           </div>
         </div>
@@ -1514,8 +1561,6 @@
     async function switchReviewBranch(branch, projectId, path) {
       showNotification(`Switching to branch: ${branch}...`, 'info');
       
-      // For now, rescan the project (in future, could fetch specific branch from Git)
-      // This will show the code review with the new branch context
       const panel = document.getElementById('contentPanel');
       panel.innerHTML = `
         <div class="flex flex-col items-center justify-center h-full">
@@ -1525,24 +1570,28 @@
       `;
       
       try {
-        // In a full implementation, we would checkout the branch first
-        // For now, we just rescan the current state
-        const res = await fetch(`/api/scan-project/${projectId}?t=${Date.now()}`);
+        // Call the branch-specific scan API
+        const res = await fetch(`/api/scan-project/${projectId}?branch=${encodeURIComponent(branch)}&t=${Date.now()}`);
         const result = await res.json();
         
-        if (result.error) {
-          panel.innerHTML = `<div class="text-red-400 p-4">Error: ${result.error}</div>`;
+        if (!result.success) {
+          panel.innerHTML = `<div class="text-red-400 p-4">Error: ${result.error || 'Failed to scan branch'}</div>`;
           return;
         }
         
         // Re-render with new scan results
         renderProjectReview(panel, result, projectId, path);
         
-        // Update the branch selector to show selected branch
-        const branchSelect = document.getElementById('reviewBranch');
-        if (branchSelect) {
-          branchSelect.value = branch;
-        }
+        // Refresh branches to ensure list is up to date
+        fetchProjectBranches(projectId);
+        
+        // Set the selected branch
+        setTimeout(() => {
+          const branchSelect = document.getElementById('reviewBranch');
+          if (branchSelect) {
+            branchSelect.value = branch;
+          }
+        }, 100);
         
         showNotification(`Switched to branch: ${branch}`, 'success');
       } catch (e) {
@@ -1566,8 +1615,11 @@
       const fileViolations = window.currentViolations[filePath] || [];
       
       document.getElementById('currentFileName').textContent = fileName;
+      const errorCount = fileViolations.filter(v => v.severity === 'error').length;
+      const warningCount = fileViolations.filter(v => v.severity === 'warning').length;
+      const infoCount = fileViolations.filter(v => v.severity === 'info').length;
       document.getElementById('currentFileIssues').textContent = 
-        `${fileViolations.length} issue${fileViolations.length !== 1 ? 's' : ''} (${fileViolations.filter(v => v.severity === 'error').length} errors, ${fileViolations.filter(v => v.severity === 'warning').length} warnings)`;
+        `${fileViolations.length} issue${fileViolations.length !== 1 ? 's' : ''} (${errorCount} errors, ${warningCount} warnings, ${infoCount} info)`;
       
       // Render issues
       renderIssuesPanel(fileViolations, filePath);

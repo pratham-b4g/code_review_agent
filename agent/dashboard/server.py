@@ -355,6 +355,116 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
+        # Get project branches from Git
+        if path.startswith("/api/projects/") and path.endswith("/branches"):
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            try:
+                project_id = int(path.split("/")[3])
+                db = _get_db()
+                
+                # Get project details
+                projects = db.get_all_projects()
+                project = next((p for p in projects if p["id"] == project_id), None)
+                
+                if not project:
+                    self._json_response({"error": "Project not found"}, 404)
+                    return
+                
+                # Get user role
+                user_role = _current_user.get("role", "developer")
+                user_email = _current_user["email"]
+                
+                # Fetch branches from Git
+                import subprocess
+                import tempfile
+                import shutil
+                
+                project_path = project["path"]
+                branches = []
+                temp_dir = None
+                
+                try:
+                    if project_path.startswith(('http://', 'https://', 'git@')):
+                        # For remote repos, use git ls-remote to get branches
+                        result = subprocess.run(
+                            ['git', 'ls-remote', '--heads', project_path],
+                            capture_output=True, text=True, timeout=30
+                        )
+                        if result.returncode == 0:
+                            for line in result.stdout.strip().split('\n'):
+                                if line:
+                                    # Format: <sha>\trefs/heads/<branch>
+                                    parts = line.split('\t')
+                                    if len(parts) >= 2:
+                                        branch = parts[1].replace('refs/heads/', '')
+                                        branches.append(branch)
+                    elif os.path.exists(project_path):
+                        # For local repos
+                        result = subprocess.run(
+                            ['git', '-C', project_path, 'branch', '-r'],
+                            capture_output=True, text=True, timeout=30
+                        )
+                        if result.returncode == 0:
+                            for line in result.stdout.strip().split('\n'):
+                                if line and '->' not in line:
+                                    branch = line.strip().replace('origin/', '')
+                                    if branch:
+                                        branches.append(branch)
+                        else:
+                            # Try local branches
+                            result = subprocess.run(
+                                ['git', '-C', project_path, 'branch'],
+                                capture_output=True, text=True, timeout=30
+                            )
+                            if result.returncode == 0:
+                                for line in result.stdout.strip().split('\n'):
+                                    if line:
+                                        branch = line.strip().replace('* ', '')
+                                        if branch:
+                                            branches.append(branch)
+                except Exception as e:
+                    print(f"[Branches] Error fetching branches: {e}")
+                    branches = ['main', 'develop']  # Fallback
+                
+                if not branches:
+                    branches = ['main', 'develop']  # Default fallback
+                
+                # Remove duplicates and sort
+                branches = sorted(list(set(branches)))
+                
+                # Filter branches based on user role
+                if user_role == 'developer':
+                    # For developers, only show branches they own (based on analytics data)
+                    # Get analytics to find which branches this developer pushed to
+                    analytics = db.get_analytics(user_email=user_email, project_id=project_id)
+                    developer_branches = set()
+                    for a in analytics:
+                        if a.get('branch'):
+                            developer_branches.add(a.get('branch'))
+                    
+                    # Also check for branches with developer's email/username in name
+                    for branch in branches:
+                        if user_email.split('@')[0].lower() in branch.lower():
+                            developer_branches.add(branch)
+                    
+                    # Filter to only developer's branches
+                    branches = [b for b in branches if b in developer_branches]
+                    if not branches:
+                        branches = ['main']  # Always allow main
+                
+                # TL and super_admin see all branches
+                self._json_response({
+                    "branches": branches,
+                    "role": user_role,
+                    "filtered": user_role == 'developer'
+                })
+                
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
         # Scan project for code review
         if path.startswith("/api/scan-project/"):
             if not _current_user:
@@ -381,6 +491,37 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 # Run code review scan
                 project_path = project["path"]
                 result = self._scan_project(project_path, project_id, _current_user["email"])
+                self._json_response(result)
+                
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Scan project on a specific branch
+        if path.startswith("/api/scan-project/") and "branch" in parsed.query:
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            try:
+                parsed_qs = parse_qs(parsed.query)
+                project_id = int(path.split("/")[3])
+                branch = parsed_qs.get("branch", ["main"])[0]
+                
+                db = _get_db()
+                projects = db.get_all_projects()
+                project = next((p for p in projects if p["id"] == project_id), None)
+                
+                if not project:
+                    self._json_response({"error": "Project not found"}, 404)
+                    return
+                
+                user_projects = db.get_user_projects(_current_user["email"])
+                if not any(up["id"] == project_id for up in user_projects):
+                    self._json_response({"error": "Not assigned to this project"}, 403)
+                    return
+                
+                project_path = project["path"]
+                result = self._scan_project_branch(project_path, project_id, _current_user["email"], branch)
                 self._json_response(result)
                 
             except Exception as e:
@@ -771,32 +912,66 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         
         # Ensure ESLint config exists with unused-imports rules
         eslintrc_path = Path(project_root) / ".eslintrc.json"
-        if not eslintrc_path.exists():
-            has_typescript = any(Path(project_root).glob("**/*.ts")) or any(Path(project_root).glob("**/*.tsx"))
-            config = {
-                "env": {"browser": True, "es2021": True, "node": True},
-                "extends": ["eslint:recommended", "plugin:unused-imports/recommended"],
-                "parserOptions": {"ecmaVersion": "latest", "sourceType": "module"},
-                "plugins": ["unused-imports"],
-                "rules": {
-                    "unused-imports/no-unused-imports": "error",
-                    "unused-imports/no-unused-vars": [
-                        "warn",
-                        {"vars": "all", "varsIgnorePattern": "^_", "args": "after-used", "argsIgnorePattern": "^_"}
-                    ],
-                    "no-unused-vars": "off"
-                }
-            }
-            if has_typescript:
+        has_typescript = any(Path(project_root).glob("**/*.ts")) or any(Path(project_root).glob("**/*.tsx"))
+        
+        # Load existing config or create new one
+        if eslintrc_path.exists():
+            try:
+                config = json.loads(eslintrc_path.read_text())
+                print(f"[ESLint] Updating existing .eslintrc.json with unused-imports rules")
+            except json.JSONDecodeError:
+                config = {}
+                print(f"[ESLint] Existing .eslintrc.json is invalid, creating new one")
+        else:
+            config = {}
+            print(f"[ESLint] Creating new .eslintrc.json with unused-imports rules")
+        
+        # Ensure plugins array exists
+        if "plugins" not in config:
+            config["plugins"] = []
+        if "unused-imports" not in config["plugins"]:
+            config["plugins"].append("unused-imports")
+        
+        # Ensure extends array exists
+        if "extends" not in config:
+            config["extends"] = []
+        if isinstance(config["extends"], str):
+            config["extends"] = [config["extends"]]
+        if "plugin:unused-imports/recommended" not in config["extends"]:
+            config["extends"].append("plugin:unused-imports/recommended")
+        
+        # Ensure rules object exists
+        if "rules" not in config:
+            config["rules"] = {}
+        
+        # Add unused-imports rules
+        config["rules"]["unused-imports/no-unused-imports"] = "error"
+        config["rules"]["unused-imports/no-unused-vars"] = [
+            "warn",
+            {"vars": "all", "varsIgnorePattern": "^_", "args": "after-used", "argsIgnorePattern": "^_"}
+        ]
+        config["rules"]["no-unused-vars"] = "off"
+        
+        # TypeScript support
+        if has_typescript:
+            if "@typescript-eslint" not in config["plugins"]:
+                config["plugins"].append("@typescript-eslint")
+            if "plugin:@typescript-eslint/recommended" not in config["extends"]:
                 config["extends"].append("plugin:@typescript-eslint/recommended")
-                config["parser"] = "@typescript-eslint/parser"
-                config["rules"]["@typescript-eslint/no-unused-vars"] = [
-                    "warn",
-                    {"vars": "all", "varsIgnorePattern": "^_", "args": "after-used", "argsIgnorePattern": "^_"}
-                ]
-            
-            eslintrc_path.write_text(json.dumps(config, indent=2))
-            print(f"[ESLint] Created .eslintrc.json with unused-imports rules")
+            config["parser"] = "@typescript-eslint/parser"
+            config["rules"]["@typescript-eslint/no-unused-vars"] = [
+                "warn",
+                {"vars": "all", "varsIgnorePattern": "^_", "args": "after-used", "argsIgnorePattern": "^_"}
+            ]
+        
+        # Ensure env and parserOptions exist
+        if "env" not in config:
+            config["env"] = {"browser": True, "es2021": True, "node": True}
+        if "parserOptions" not in config:
+            config["parserOptions"] = {"ecmaVersion": "latest", "sourceType": "module"}
+        
+        eslintrc_path.write_text(json.dumps(config, indent=2))
+        print(f"[ESLint] Config updated with unused-imports rules")
         
         return eslint_bin
 
@@ -1010,6 +1185,78 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             
         except Exception as e:
             print(f"[Scan Error] {e}")
+            return {"success": False, "error": str(e)}
+        finally:
+            # Clean up temp directory if we cloned
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception:
+                    pass
+
+    def _scan_project_branch(self, project_path: str, project_id: int, user_email: str, branch: str = "main") -> dict:
+        """Run a code review scan on a specific branch of a project."""
+        import tempfile
+        import shutil
+        import subprocess
+        
+        temp_dir = None
+        scan_path = project_path
+        
+        try:
+            # Check if it's a remote Git URL
+            if project_path.startswith(('http://', 'https://', 'git@')):
+                # Clone specific branch to temp directory
+                temp_dir = tempfile.mkdtemp(prefix=f'cra_scan_{branch.replace('/', '_')}_')
+                repo_name = project_path.split('/')[-1].replace('.git', '')
+                scan_path = temp_dir
+                
+                # Clone the specific branch
+                result = subprocess.run(
+                    ['git', 'clone', '--depth', '1', '--branch', branch, project_path, temp_dir],
+                    capture_output=True, text=True, timeout=60
+                )
+                if result.returncode != 0:
+                    # If branch doesn't exist, fall back to main and try to checkout
+                    result = subprocess.run(
+                        ['git', 'clone', '--depth', '1', project_path, temp_dir],
+                        capture_output=True, text=True, timeout=60
+                    )
+                    if result.returncode != 0:
+                        return {"success": False, "error": f"Failed to clone repository: {result.stderr}"}
+                    
+                    # Try to checkout the specific branch
+                    checkout_result = subprocess.run(
+                        ['git', '-C', temp_dir, 'checkout', '-b', branch, f'origin/{branch}'],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    if checkout_result.returncode != 0 and branch != 'main':
+                        # Branch doesn't exist, return error or fall back to main
+                        return {"success": False, "error": f"Branch '{branch}' not found in repository"}
+                        
+            elif os.path.exists(project_path):
+                # For local repos, try to checkout the branch
+                result = subprocess.run(
+                    ['git', '-C', project_path, 'checkout', branch],
+                    capture_output=True, text=True, timeout=30
+                )
+                if result.returncode != 0 and branch != 'main':
+                    return {"success": False, "error": f"Branch '{branch}' not found in local repository"}
+                scan_path = project_path
+            else:
+                return {"success": False, "error": f"Project path does not exist: {project_path}"}
+            
+            # Use the existing _scan_project logic but with the branch-specific path
+            result = self._scan_project(scan_path, project_id, user_email)
+            
+            # Add branch info to result
+            if isinstance(result, dict) and result.get("success"):
+                result["branch"] = branch
+            
+            return result
+            
+        except Exception as e:
+            print(f"[Scan Branch Error] {e}")
             return {"success": False, "error": str(e)}
         finally:
             # Clean up temp directory if we cloned
