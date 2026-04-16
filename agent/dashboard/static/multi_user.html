@@ -805,6 +805,9 @@
         // Add cache-busting timestamp to prevent browser caching
         const res = await fetch(`/api/my-projects?t=${Date.now()}`);
         const projects = await res.json();
+        
+        // Check if user is TL or Super Admin (can manage assignments)
+        const canManage = currentRole === 'super_admin' || currentRole === 'admin';
 
         panel.innerHTML = `
           <h2 class="text-xl font-bold text-white mb-6">My Projects</h2>
@@ -818,7 +821,13 @@
                     <p class="text-sm text-gray-500 mono mt-1">${p.path}</p>
                     <p class="text-xs text-gray-600 mt-1">Role: ${p.role_on_project}</p>
                   </div>
-                  <button onclick="openProjectReview(${p.id}, '${p.path}')" class="px-3 py-1 text-sm bg-accent-blue text-white rounded hover:bg-blue-600">Review Code</button>
+                  <div class="flex gap-2">
+                    ${canManage ? `
+                      <button onclick="viewProject(${p.id}, '${p.name}', '${p.path}')" class="px-3 py-1 text-sm bg-gray-700 text-white rounded hover:bg-gray-600">View</button>
+                      <button onclick="assignUsers(${p.id})" class="px-3 py-1 text-sm bg-accent-purple text-white rounded hover:bg-purple-600">Assign</button>
+                    ` : ''}
+                    <button onclick="openProjectReview(${p.id}, '${p.path}')" class="px-3 py-1 text-sm bg-accent-blue text-white rounded hover:bg-blue-600">Review Code</button>
+                  </div>
                 </div>
               </div>
             `).join('')}

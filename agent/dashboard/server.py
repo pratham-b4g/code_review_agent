@@ -748,12 +748,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             violations = []
             for v in result.violations:
                 violations.append({
-                    "file": v.file,
-                    "line": v.line,
-                    "severity": v.severity,
+                    "file": v.file_path,
+                    "line": v.line_number,
+                    "severity": v.severity.value if hasattr(v.severity, 'value') else str(v.severity),
                     "message": v.message,
                     "rule_id": v.rule_id,
-                    "code_snippet": v.code_snippet if hasattr(v, 'code_snippet') else None
+                    "code_snippet": v.snippet if v.snippet else None
                 })
             
             # Update analytics with scan results
