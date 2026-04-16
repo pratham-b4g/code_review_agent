@@ -998,11 +998,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             print(f"[ESLint] Running on {len(js_ts_files)} files...")
             cmd = eslint_bin.split() + ["--format=json", "--no-error-on-unmatched-pattern"] + js_ts_files
             result = subprocess.run(cmd, cwd=project_root, capture_output=True, text=True, timeout=120)
-            
             if result.stdout:
                 try:
                     eslint_results = json.loads(result.stdout)
-                    print(f"[ESLint] Found {sum(len(f.get('messages', [])) for f in eslint_results)} issues")
+                    total_eslint_issues = sum(len(f.get('messages', [])) for f in eslint_results)
+                    print(f"[ESLint] Found {total_eslint_issues} issues from JSON output")
                     for file_result in eslint_results:
                         file_path = file_result.get("filePath", "")
                         for msg in file_result.get("messages", []):
@@ -1121,11 +1121,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             result.violations.extend(arch_violations)
             
             # Run ESLint for JS/TS projects to catch linting issues
+            eslint_violations = []
             if lang in ('javascript', 'typescript'):
                 eslint_violations = self._run_eslint_json(scan_path, files, temp_dir)
+                print(f"[Scan] ESLint found {len(eslint_violations)} violations")
+                for v in eslint_violations[:5]:  # Log first 5
+                    print(f"  - {v.file_path}:{v.line_number} [{v.severity.value}] {v.rule_id}: {v.message[:50]}")
                 result.violations.extend(eslint_violations)
             
+            print(f"[Scan] Before dedup: {len(result.violations)} total violations")
             result.deduplicate()
+            print(f"[Scan] After dedup: {len(result.violations)} total violations")
             
             # Calculate relative paths to hide temp directory
             def make_relative(path):
@@ -1145,8 +1151,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             # Prepare violations with relative paths
             violations = []
             for v in result.violations:
+                rel_file = make_relative(v.file_path)
                 violations.append({
-                    "file": make_relative(v.file_path),
+                    "file": rel_file,
                     "line": v.line_number,
                     "severity": v.severity.value if hasattr(v.severity, 'value') else str(v.severity),
                     "message": v.message,
@@ -1154,6 +1161,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     "code_snippet": v.snippet if v.snippet else None,
                     "fix_suggestion": v.fix_suggestion if hasattr(v, 'fix_suggestion') else None
                 })
+            
+            # Debug: Log sample violations
+            print(f"[Scan] Sample violations being returned:")
+            for v in violations[:5]:
+                print(f"  - {v['file']}:{v['line']} [{v['severity']}] {v['rule_id']}: {v['message'][:50]}")
             
             # Update analytics with scan results
             db = _get_db()

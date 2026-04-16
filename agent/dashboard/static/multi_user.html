@@ -1647,7 +1647,7 @@
       }
       
       panel.innerHTML = violations.map(v => `
-        <div class="p-3 border-b border-gray-800/50 ${v.severity === 'error' ? 'bg-accent-red/5' : v.severity === 'warning' ? 'bg-accent-yellow/5' : 'bg-accent-blue/5'}">
+        <div class="p-3 border-b border-gray-800/50 ${v.severity === 'error' ? 'bg-accent-red/5' : v.severity === 'warning' ? 'bg-accent-yellow/5' : 'bg-accent-blue/5'} cursor-pointer hover:bg-opacity-10 transition" onclick="scrollToLine(${v.line})">
           <div class="flex items-start gap-2">
             <span class="severity-badge ${v.severity === 'error' ? 'bg-accent-red text-white' : v.severity === 'warning' ? 'bg-accent-yellow text-black' : 'bg-accent-blue text-white'}">${v.severity}</span>
             <span class="text-xs text-gray-500 mono">L${v.line}</span>
@@ -1657,6 +1657,26 @@
           ${v.fix_suggestion ? `<p class="text-accent-green text-xs mt-1">Fix: ${v.fix_suggestion}</p>` : ''}
         </div>
       `).join('');
+    }
+
+    // ── Scroll to specific line in code view ───────────────────
+    function scrollToLine(lineNum) {
+      const codeBody = document.getElementById('codeBody');
+      if (!codeBody) return;
+      
+      // Find the row for this line
+      const rows = codeBody.querySelectorAll('tr');
+      if (lineNum > 0 && lineNum <= rows.length) {
+        const targetRow = rows[lineNum - 1]; // Line numbers are 1-based
+        if (targetRow) {
+          targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          // Add temporary highlight effect
+          targetRow.classList.add('bg-accent-blue/20');
+          setTimeout(() => {
+            targetRow.classList.remove('bg-accent-blue/20');
+          }, 2000);
+        }
+      }
     }
 
     function renderCodeView(lines, violations) {
