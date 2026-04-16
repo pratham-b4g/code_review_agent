@@ -236,7 +236,7 @@ class RuleEngine:
         if ext == ".py" and self._python_analyzer:
             return self._python_analyzer.run_ast_check(file_path, content, rule, ast_check)
 
-        if ext in (".js", ".jsx", ".ts", ".tsx") and self._js_analyzer:
+        if ext in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs") and self._js_analyzer:
             return self._js_analyzer.run_ast_check(file_path, content, rule, ast_check)
 
         # Fallback: regex approximation for unsupported languages

@@ -279,21 +279,27 @@ def detect_cross_file_duplicates(
     hash_map: Dict[str, List[Tuple[str, str, int, int, str]]] = defaultdict(list)
     file_contents: Dict[str, str] = {}
 
+    _ANALYZABLE_EXTS_PY = {".py"}
+    _ANALYZABLE_EXTS_JS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
+
     for file_path in files:
         try:
             content = Path(file_path).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        file_contents[file_path] = content
-        stats.total_lines += _count_code_lines(content)
 
         ext = Path(file_path).suffix.lower()
-        if ext == ".py":
+        if ext in _ANALYZABLE_EXTS_PY:
             spans = _extract_blocks_with_spans_python(content)
-        elif ext in (".js", ".jsx", ".ts", ".tsx"):
+        elif ext in _ANALYZABLE_EXTS_JS:
             spans = _extract_blocks_with_spans_js(content)
         else:
             continue
+
+        # Only count lines from files we actually analyze for duplication
+        file_contents[file_path] = content
+        stats.total_lines += _count_code_lines(content)
+
         for label, start, end, h in spans:
             hash_map[h].append((file_path, label, start, end, content))
 

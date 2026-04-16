@@ -61,6 +61,7 @@ def _get_email_notifier():
 
 def _run_scan(project_dir: str, language: Optional[str] = None,
               framework: Optional[str] = None) -> Dict[str, Any]:
+    from agent.detector.language_detector import LanguageDetector
     from agent.detector.framework_detector import FrameworkDetector
     from agent.git.git_utils import scan_directory
     from agent.utils.config_manager import ConfigManager
@@ -465,7 +466,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
-        # Scan project for code review
+        # Scan project for code review (with optional branch parameter)
         if path.startswith("/api/scan-project/"):
             if not _current_user:
                 self._json_response({"error": "Unauthorized"}, 401)
@@ -473,57 +474,34 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             try:
                 project_id = int(path.split("/")[3])
                 db = _get_db()
-                
+
                 # Get project details
                 projects = db.get_all_projects()
                 project = next((p for p in projects if p["id"] == project_id), None)
-                
+
                 if not project:
                     self._json_response({"error": "Project not found"}, 404)
                     return
-                
+
                 # Check if user is assigned to this project
                 user_projects = db.get_user_projects(_current_user["email"])
                 if not any(up["id"] == project_id for up in user_projects):
                     self._json_response({"error": "Not assigned to this project"}, 403)
                     return
-                
-                # Run code review scan
-                project_path = project["path"]
-                result = self._scan_project(project_path, project_id, _current_user["email"])
-                self._json_response(result)
-                
-            except Exception as e:
-                self._json_response({"error": str(e)}, 500)
-            return
 
-        # Scan project on a specific branch
-        if path.startswith("/api/scan-project/") and "branch" in parsed.query:
-            if not _current_user:
-                self._json_response({"error": "Unauthorized"}, 401)
-                return
-            try:
-                parsed_qs = parse_qs(parsed.query)
-                project_id = int(path.split("/")[3])
-                branch = parsed_qs.get("branch", ["main"])[0]
-                
-                db = _get_db()
-                projects = db.get_all_projects()
-                project = next((p for p in projects if p["id"] == project_id), None)
-                
-                if not project:
-                    self._json_response({"error": "Project not found"}, 404)
-                    return
-                
-                user_projects = db.get_user_projects(_current_user["email"])
-                if not any(up["id"] == project_id for up in user_projects):
-                    self._json_response({"error": "Not assigned to this project"}, 403)
-                    return
-                
                 project_path = project["path"]
-                result = self._scan_project_branch(project_path, project_id, _current_user["email"], branch)
+
+                # Check if branch parameter is specified
+                qs = parse_qs(parsed.query)
+                branch = qs.get("branch", [None])[0]
+
+                if branch:
+                    result = self._scan_project_branch(project_path, project_id, _current_user["email"], branch)
+                else:
+                    result = self._scan_project(project_path, project_id, _current_user["email"])
+
                 self._json_response(result)
-                
+
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
             return
@@ -1139,7 +1117,23 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             result.violations.extend(arch_violations)
             
             print(f"[Scan] Duplication stats: {dup_stats.duplicated_lines} / {dup_stats.total_lines} lines ({dup_stats.percentage:.1f}%)")
-            
+
+            # Run taint analysis for Python projects (matches CLI behavior)
+            if lang == 'python':
+                try:
+                    from agent.analyzer.taint_analyzer import run_taint_analysis
+                    for f in files:
+                        if f.endswith('.py'):
+                            try:
+                                src = Path(f).read_text(encoding='utf-8', errors='replace')
+                                taint_v = run_taint_analysis(f, src)
+                                result.violations.extend(taint_v)
+                            except OSError:
+                                pass
+                    print(f"[Scan] Taint analysis complete")
+                except Exception as e:
+                    print(f"[Scan] Taint analysis skipped: {e}")
+
             # Run ESLint for JS/TS projects to catch linting issues
             eslint_violations = []
             if lang in ('javascript', 'typescript'):
@@ -1238,9 +1232,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     "total_lines": dup_stats.total_lines
                 }
             }
-            
-            print(f"[Scan] Returning duplication stats: {dup_stats.percentage}% ({dup_stats.duplicated_lines}/{dup_stats.total_lines} lines)")
-            
+
         except Exception as e:
             print(f"[Scan Error] {e}")
             return {"success": False, "error": str(e)}
@@ -1265,8 +1257,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             # Check if it's a remote Git URL
             if project_path.startswith(('http://', 'https://', 'git@')):
                 # Clone specific branch to temp directory
-                temp_dir = tempfile.mkdtemp(prefix=f'cra_scan_{branch.replace('/', '_')}_')
-                repo_name = project_path.split('/')[-1].replace('.git', '')
+                safe_branch = branch.replace('/', '_')
+                temp_dir = tempfile.mkdtemp(prefix=f'cra_scan_{safe_branch}_')
                 scan_path = temp_dir
                 
                 # Clone the specific branch

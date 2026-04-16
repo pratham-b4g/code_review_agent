@@ -1278,34 +1278,35 @@
     }
 
     // ── Fetch Project Branches from Git ────────────────────────
-    async function fetchProjectBranches(projectId) {
+    async function fetchProjectBranches(projectId, selectedBranch) {
       try {
         const res = await fetch(`/api/projects/${projectId}/branches?t=${Date.now()}`);
         const data = await res.json();
-        
+
         const select = document.getElementById('reviewBranch');
         if (!select) return;
-        
+
         if (data.error) {
           select.innerHTML = '<option value="main" selected>main</option>';
           return;
         }
-        
+
         const branches = data.branches || ['main'];
         const role = data.role || 'developer';
-        
-        // Build options
-        select.innerHTML = branches.map(branch => 
-          `<option value="${branch}" ${branch === 'main' ? 'selected' : ''}>${branch}</option>`
+        const activeBranch = selectedBranch || 'main';
+
+        // Build options with the correct branch selected
+        select.innerHTML = branches.map(branch =>
+          `<option value="${branch}" ${branch === activeBranch ? 'selected' : ''}>${branch}</option>`
         ).join('');
-        
+
         // Add a note if filtered
         if (data.filtered) {
           select.title = 'Showing only your branches (Developer view)';
         } else if (role === 'admin' || role === 'super_admin') {
           select.title = 'All branches (TL/Admin view)';
         }
-        
+
       } catch (e) {
         console.error('Error fetching branches:', e);
         const select = document.getElementById('reviewBranch');
@@ -1470,17 +1471,22 @@
     }
 
     function buildFileTree(files, violations) {
-      const tree = { type: 'root', children: {}, violations: [] };
-      
+      const tree = { type: 'root', children: {}, violations: [], orphanedViolations: [] };
+
+      // Build a set of known file paths for fast lookup
+      const knownPaths = new Set();
+
       files.forEach(f => {
-        const parts = f.path.replace(/\\/g, '/').split('/').filter(p => p);
+        const normalizedPath = f.path.replace(/\\/g, '/');
+        knownPaths.add(normalizedPath);
+        const parts = normalizedPath.split('/').filter(p => p);
         let node = tree;
-        
+
         parts.forEach((part, idx) => {
           if (!node.children[part]) {
-            node.children[part] = { 
-              type: idx === parts.length - 1 ? 'file' : 'folder', 
-              children: {}, 
+            node.children[part] = {
+              type: idx === parts.length - 1 ? 'file' : 'folder',
+              children: {},
               violations: [],
               path: parts.slice(0, idx + 1).join('/'),
               fullPath: f.path,
@@ -1490,30 +1496,82 @@
           node = node.children[part];
         });
       });
-      
-      // Attach violations
+
+      // Attach violations to matching files, collect orphans
       violations.forEach(v => {
         const filePath = v.file.replace(/\\/g, '/');
         const parts = filePath.split('/').filter(p => p);
         let node = tree;
-        
+        let matched = false;
+
         parts.forEach(part => {
           if (node.children[part]) {
             node = node.children[part];
           }
         });
-        
-        if (node && node.type === 'file') {
+
+        if (node && node !== tree && node.type === 'file') {
           node.violations.push(v);
+          matched = true;
+        }
+
+        // Also try direct path match (handles edge cases with path traversal)
+        if (!matched && knownPaths.has(filePath)) {
+          // Walk again with exact match
+          const exactParts = filePath.split('/').filter(p => p);
+          let exactNode = tree;
+          for (const part of exactParts) {
+            if (exactNode.children[part]) exactNode = exactNode.children[part];
+          }
+          if (exactNode && exactNode !== tree && exactNode.type === 'file') {
+            exactNode.violations.push(v);
+            matched = true;
+          }
+        }
+
+        if (!matched) {
+          tree.orphanedViolations.push(v);
         }
       });
-      
+
       return tree;
     }
 
     function renderFileTree(node, level = 0) {
       if (node.type === 'root') {
-        return Object.values(node.children).map(child => renderFileTree(child, 0)).join('');
+        let html = '';
+
+        // Show orphaned (project-level) violations at the top
+        const orphaned = node.orphanedViolations || [];
+        const filteredOrphans = severityFilter === 'all'
+          ? orphaned
+          : orphaned.filter(v => v.severity === severityFilter);
+
+        if (filteredOrphans.length > 0) {
+          const oErrors = filteredOrphans.filter(v => v.severity === 'error').length;
+          const oWarnings = filteredOrphans.filter(v => v.severity === 'warning').length;
+          const oInfos = filteredOrphans.filter(v => v.severity === 'info').length;
+          html += `
+            <div class="sidebar-item px-2 py-1.5 cursor-pointer rounded hover:bg-bg-dark text-sm ${currentFile === '__project__' ? 'bg-bg-dark border-l-2 border-accent-blue' : ''}"
+                 onclick="showProjectIssues()">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-1 truncate">
+                  <span class="text-accent-purple">&#9881;</span>
+                  <span class="text-gray-300 font-medium truncate">Project Issues</span>
+                </div>
+                <div class="flex gap-1 shrink-0">
+                  ${oErrors > 0 ? `<span class="text-xs bg-accent-red/20 text-accent-red px-1.5 rounded">${oErrors}</span>` : ''}
+                  ${oWarnings > 0 ? `<span class="text-xs bg-accent-yellow/20 text-accent-yellow px-1.5 rounded">${oWarnings}</span>` : ''}
+                  ${oInfos > 0 ? `<span class="text-xs bg-accent-blue/20 text-accent-blue px-1.5 rounded">${oInfos}</span>` : ''}
+                </div>
+              </div>
+            </div>
+            <div class="border-b border-gray-800 my-1"></div>
+          `;
+        }
+
+        html += Object.values(node.children).map(child => renderFileTree(child, 0)).join('');
+        return html;
       }
       
       const indent = level * 12;
@@ -1603,21 +1661,18 @@
         // Call the branch-specific scan API
         const res = await fetch(`/api/scan-project/${projectId}?branch=${encodeURIComponent(branch)}&t=${Date.now()}`);
         const result = await res.json();
-        
+
         if (!result.success) {
           panel.innerHTML = `<div class="text-red-400 p-4">Error: ${result.error || 'Failed to scan branch'}</div>`;
           return;
         }
-        
+
         // Re-render with new scan results
         renderProjectReview(panel, result, projectId, path);
-        
-        // Set the selected branch immediately after render
-        const branchSelect = document.getElementById('reviewBranch');
-        if (branchSelect) {
-          branchSelect.value = branch;
-        }
-        
+
+        // Re-fetch branches and set the selected one after dropdown is populated
+        await fetchProjectBranches(projectId, branch);
+
         showNotification(`Switched to branch: ${branch}`, 'success');
       } catch (e) {
         panel.innerHTML = `<div class="text-red-400 p-4">Error switching branch: ${e.message}</div>`;
@@ -1725,6 +1780,56 @@
     function hideDuplicationView() {
       document.getElementById('duplicationView').classList.add('hidden');
       document.getElementById('fileTree').classList.remove('hidden');
+    }
+
+    // ── Show Project-Level Issues ─────────────────────────────
+    function showProjectIssues() {
+      currentFile = '__project__';
+      hideDuplicationView();
+
+      document.getElementById('codePlaceholder').classList.add('hidden');
+      document.getElementById('codeContent').classList.remove('hidden');
+      document.getElementById('codeContent').classList.add('flex');
+
+      // Update sidebar selection
+      document.getElementById('fileTree').innerHTML = renderFileTree(buildFileTree(currentReviewData.files, currentReviewData.violations));
+
+      // Collect orphaned violations
+      const fileTree = buildFileTree(currentReviewData.files, currentReviewData.violations);
+      const orphaned = fileTree.orphanedViolations || [];
+      const filtered = severityFilter === 'all' ? orphaned : orphaned.filter(v => v.severity === severityFilter);
+
+      document.getElementById('currentFileName').textContent = 'Project Issues';
+      const errorCount = filtered.filter(v => v.severity === 'error').length;
+      const warningCount = filtered.filter(v => v.severity === 'warning').length;
+      const infoCount = filtered.filter(v => v.severity === 'info').length;
+      document.getElementById('currentFileIssues').textContent =
+        `${filtered.length} issue${filtered.length !== 1 ? 's' : ''} (${errorCount} errors, ${warningCount} warnings, ${infoCount} info)`;
+
+      // Show issues in the issues panel
+      const panel = document.getElementById('issuesPanel');
+      if (!filtered.length) {
+        panel.innerHTML = '<div class="p-4 text-center text-accent-green">No project-level issues</div>';
+      } else {
+        panel.innerHTML = filtered.map(v => `
+          <div class="p-3 border-b border-gray-800/50 ${v.severity === 'error' ? 'bg-accent-red/5' : v.severity === 'warning' ? 'bg-accent-yellow/5' : 'bg-accent-blue/5'}">
+            <div class="flex items-start gap-2">
+              <span class="severity-badge ${v.severity === 'error' ? 'bg-accent-red text-white' : v.severity === 'warning' ? 'bg-accent-yellow text-black' : 'bg-accent-blue text-white'}">${v.severity}</span>
+              <span class="text-xs text-gray-500 mono">${v.file}</span>
+            </div>
+            <p class="text-white text-sm mt-1">${v.message}</p>
+            ${v.rule_id ? `<p class="text-gray-500 text-xs mt-1 mono">${v.rule_id}</p>` : ''}
+            ${v.fix_suggestion ? `<p class="text-accent-green text-xs mt-1">Fix: ${v.fix_suggestion}</p>` : ''}
+          </div>
+        `).join('');
+      }
+
+      // Clear code view - no file to show
+      document.getElementById('codeBody').innerHTML = `
+        <tr><td colspan="2" class="p-8 text-center text-gray-500">
+          Project-level issues are not associated with a specific file.<br>
+          Review the issues panel above for details.
+        </td></tr>`;
     }
 
     // ── Scroll to specific line in code view ───────────────────

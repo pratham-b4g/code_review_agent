@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import py_compile; py_compile.compile\\('agent/dashboard/server.py', doraise=True\\); print\\('server.py OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('agent/analyzer/cross_file_analyzer.py', doraise=True\\); print\\('cross_file_analyzer.py OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('agent/rules/rule_engine.py', doraise=True\\); print\\('rule_engine.py OK'\\)\")",
+      "Bash(python -m pytest tests/ -x -q --timeout=30)",
+      "Bash(python -m unittest discover tests/ -v)"
+    ]
+  }
+}
