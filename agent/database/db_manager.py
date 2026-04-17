@@ -228,10 +228,21 @@ class DatabaseManager:
             return []
 
     def create_project(self, name: str, path: str, main_branch: str, created_by: int) -> Optional[int]:
-        """Create a new project."""
+        """Create a new project. If a project with the same path already exists
+        (case-insensitive, normalized), return the existing project's id instead
+        of creating a duplicate."""
         try:
+            # Normalize the path for duplicate checking
+            norm_path = (path or "").strip().rstrip("/").rstrip(".git").replace("\\", "/").lower()
             with self.connect() as conn:
                 with conn.cursor() as cur:
+                    # Check for existing project with same normalized path
+                    cur.execute("SELECT id, path FROM projects WHERE is_active = TRUE")
+                    for row in cur.fetchall():
+                        existing_norm = (row[1] or "").strip().rstrip("/").rstrip(".git").replace("\\", "/").lower()
+                        if existing_norm == norm_path:
+                            return row[0]  # Return existing id, don't create duplicate
+                    # No duplicate — create new
                     cur.execute("""
                         INSERT INTO projects (name, path, main_branch, created_by)
                         VALUES (%s, %s, %s, %s)
@@ -240,7 +251,8 @@ class DatabaseManager:
                     result = cur.fetchone()
                     conn.commit()
                     return result[0] if result else None
-        except Exception:
+        except Exception as e:
+            print(f"[DB Error] create_project: {e}")
             return None
 
     def get_all_projects(self) -> List[Dict[str, Any]]:

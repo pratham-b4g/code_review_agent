@@ -1083,12 +1083,18 @@
         const res = await fetch(`/api/my-projects?t=${Date.now()}`);
         const projects = await res.json();
         const canManage = currentRole === 'super_admin' || currentRole === 'admin';
+        const isTL = currentRole === 'admin' || currentRole === 'super_admin';
         panel.innerHTML = `
           <div class="p-6 fade-in">
-            <h2 class="text-lg font-bold text-white mb-1">My Projects</h2>
-            <p class="text-xs text-gray-500 mb-5">${projects.length} project${projects.length !== 1 ? 's' : ''} assigned to you</p>
+            <div class="flex justify-between items-start mb-5">
+              <div>
+                <h2 class="text-lg font-bold text-white mb-1">My Projects</h2>
+                <p class="text-xs text-gray-500">${projects.length} project${projects.length !== 1 ? 's' : ''} assigned to you</p>
+              </div>
+              ${isTL ? `<button onclick="showAddProjectModal()" class="btn px-4 py-2 gradient-blue text-white text-sm rounded-lg hover:opacity-90 shadow-lg shadow-blue-500/10">+ Add Project</button>` : ''}
+            </div>
             <div class="grid gap-3">
-              ${projects.length === 0 ? emptyState('No projects assigned', 'Contact your team lead to get assigned to a project.') : ''}
+              ${projects.length === 0 ? emptyState('No projects assigned', isTL ? 'Add a new project to get started.' : 'Contact your team lead to get assigned to a project.', isTL ? 'showAddProjectModal()' : null) : ''}
               ${projects.map(p => `
                 <div class="card p-4 fade-in">
                   <div class="flex justify-between items-start">
@@ -1138,9 +1144,14 @@
         }
         panel.innerHTML = `
           <div class="p-6 fade-in">
-            <h2 class="text-lg font-bold text-white mb-1">My Developers</h2>
-            <p class="text-xs text-gray-500 mb-5">${allDevelopers.length} developer${allDevelopers.length !== 1 ? 's' : ''}</p>
-            ${allDevelopers.length === 0 ? emptyState('No developers yet', 'Assign developers to your projects.') : `
+            <div class="flex justify-between items-start mb-5">
+              <div>
+                <h2 class="text-lg font-bold text-white mb-1">My Developers</h2>
+                <p class="text-xs text-gray-500">${allDevelopers.length} developer${allDevelopers.length !== 1 ? 's' : ''}</p>
+              </div>
+              <button onclick="showAddDeveloperModal()" class="btn px-4 py-2 gradient-blue text-white text-sm rounded-lg hover:opacity-90 shadow-lg shadow-blue-500/10">+ Add Developer</button>
+            </div>
+            ${allDevelopers.length === 0 ? emptyState('No developers yet', 'Add developers and assign them to your projects.', 'showAddDeveloperModal()') : `
             <div class="space-y-2">
               ${allDevelopers.map(d => `
                 <div class="card p-3 flex items-center gap-3 fade-in">
@@ -1690,10 +1701,94 @@
         const res = await fetch('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,path,main_branch:mainBranch||'main'})});
         const data = await res.json();
         if(data.success && data.project_id) {
+          // If TL is creating the project, auto-assign them as TL on it
+          if(currentRole === 'admin') {
+            await fetch('/api/project-assignments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:data.project_id,user_email:currentUser.email,role:'admin'})});
+          }
           for(const e of selectedTLs) await fetch('/api/project-assignments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:data.project_id,user_email:e,role:'admin'})});
           for(const e of selectedDevs) await fetch('/api/project-assignments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:data.project_id,user_email:e,role:'developer'})});
-          showNotification('Project added','success'); closeModal('addProjectModal'); loadView('projects');
+          if(data.already_existed) {
+            showNotification('Project already existed — linked to your account','info');
+          } else {
+            showNotification('Project added','success');
+          }
+          closeModal('addProjectModal');
+          loadView(currentRole === 'super_admin' ? 'projects' : 'my-projects');
         } else showNotification(data.error||'Failed','error');
+      } catch(e) { showNotification('Error: '+e.message,'error'); }
+    }
+
+    // ── Add Developer Modal (TL) ────────────────────────────────
+    async function showAddDeveloperModal() {
+      // Load TL's projects to populate the "assign to project" selector
+      let myProjects = [];
+      try {
+        const r = await fetch(`/api/my-projects?t=${Date.now()}`);
+        myProjects = await r.json();
+      } catch(e) { myProjects = []; }
+      if(!Array.isArray(myProjects) || !myProjects.length) {
+        showNotification('Add a project first before adding developers','warning');
+        return;
+      }
+      showModal('addDeveloperModal', `
+        <h3 class="text-lg font-bold text-white mb-1">Add Developer</h3>
+        <p class="text-xs text-gray-500 mb-4">If the developer already exists in the system, they'll simply be assigned to the selected project.</p>
+        <div class="mb-3">
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">Developer Name *</label>
+          <input type="text" id="newDevName" class="w-full search-input rounded-lg px-4 py-2.5 text-sm text-white" placeholder="Jane Doe" />
+        </div>
+        <div class="mb-3">
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">Developer Email *</label>
+          <input type="email" id="newDevEmail" class="w-full search-input rounded-lg px-4 py-2.5 text-sm text-white" placeholder="jane@example.com" />
+        </div>
+        <div class="mb-5">
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">Assign to Project *</label>
+          <select id="newDevProject" class="w-full search-input rounded-lg px-4 py-2.5 text-sm text-white">
+            ${myProjects.map(p => `<option value="${p.id}">${p.name}</option>`).join('')}
+          </select>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="closeModal('addDeveloperModal')" class="btn flex-1 bg-white/5 text-gray-300 py-2.5 rounded-lg hover:bg-white/10 text-sm border border-border-subtle">Cancel</button>
+          <button onclick="submitAddDeveloper()" class="btn flex-1 gradient-blue text-white py-2.5 rounded-lg hover:opacity-90 text-sm">Add Developer</button>
+        </div>
+      `);
+    }
+
+    async function submitAddDeveloper() {
+      const name = document.getElementById('newDevName').value.trim();
+      const email = document.getElementById('newDevEmail').value.trim().toLowerCase();
+      const projectId = document.getElementById('newDevProject').value;
+      if(!name || !email || !projectId) { showNotification('Fill all fields','warning'); return; }
+      try {
+        // Step 1: Create user (or reuse existing - backend handles ON CONFLICT)
+        const userRes = await fetch('/api/users', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, email, role: 'developer' })
+        });
+        const userData = await userRes.json();
+        if(!userData.success && !userData.already_existed) {
+          showNotification(userData.error || 'Failed to create developer', 'error');
+          return;
+        }
+        // Step 2: Assign to project (ON CONFLICT updates assignment)
+        const assignRes = await fetch('/api/project-assignments', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ project_id: parseInt(projectId), user_email: email, role: 'developer' })
+        });
+        const assignData = await assignRes.json();
+        if(!assignData.success) {
+          showNotification(assignData.error || 'Failed to assign developer', 'error');
+          return;
+        }
+        if(userData.already_existed) {
+          showNotification(`${name} already existed — assigned to project`,'info');
+        } else {
+          showNotification(`Developer ${name} added and assigned`,'success');
+        }
+        closeModal('addDeveloperModal');
+        loadView('developers');
       } catch(e) { showNotification('Error: '+e.message,'error'); }
     }
 

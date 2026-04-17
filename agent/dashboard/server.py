@@ -863,20 +863,36 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
-        # Create user (super admin only)
+        # Create user (super admin or TL). TLs can only create developers.
         if path == "/api/users":
-            if not _current_user or _current_user.get("role") != "super_admin":
-                self._json_response({"error": "Unauthorized"}, 403)
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            if _current_user.get("role") not in ("super_admin", "admin"):
+                self._json_response({"error": "Forbidden: admins only"}, 403)
                 return
             try:
+                requested_role = data.get("role", "developer")
+                # TLs can only create developers, not other TLs or super admins
+                if _current_user.get("role") == "admin" and requested_role != "developer":
+                    self._json_response({"error": "TLs can only create developers"}, 403)
+                    return
                 db = _get_db()
+                # create_user uses ON CONFLICT (email) DO NOTHING — returns True even if already exists
                 success = db.create_user(
                     data.get("email"),
                     data.get("name"),
-                    data.get("role"),
+                    requested_role,
                     _current_user.get("id")
                 )
-                self._json_response({"success": success})
+                # Look up user to check if they already existed (for UI feedback)
+                existing = db.get_user_by_email(data.get("email"))
+                already_existed = existing is not None
+                self._json_response({
+                    "success": success,
+                    "already_existed": already_existed,
+                    "user": existing
+                })
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
             return
@@ -891,13 +907,27 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return
             try:
                 db = _get_db()
+                # Check if a project with same path already exists
+                norm_path = (data.get("path") or "").strip().rstrip("/").rstrip(".git").replace("\\", "/").lower()
+                existing_projects = db.get_all_projects()
+                pre_existing = None
+                for p in existing_projects:
+                    existing_norm = (p.get("path") or "").strip().rstrip("/").rstrip(".git").replace("\\", "/").lower()
+                    if existing_norm == norm_path:
+                        pre_existing = p
+                        break
                 project_id = db.create_project(
                     data.get("name"),
                     data.get("path"),
                     data.get("main_branch", "main"),
                     _current_user.get("id")
                 )
-                self._json_response({"success": project_id is not None, "project_id": project_id})
+                self._json_response({
+                    "success": project_id is not None,
+                    "project_id": project_id,
+                    "already_existed": pre_existing is not None,
+                    "existing_project": pre_existing
+                })
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
             return
