@@ -1572,6 +1572,7 @@
               <select id="reviewBranch" onchange="switchReviewBranch(this.value,${projectId},'${path.replace(/'/g,"\\'")}')" class="search-input rounded-lg px-2.5 py-1.5 text-xs text-white min-w-[120px]">
                 <option disabled selected>Loading...</option>
               </select>
+              ${(currentRole==='admin'||currentRole==='super_admin') ? `<button onclick="backfillProjectHistory(${projectId})" class="btn px-3 py-1.5 bg-accent-purple/10 text-accent-purple border border-accent-purple/20 text-xs rounded-lg hover:bg-accent-purple/20" title="Import git history for all assigned developers (branches + commits)">Backfill History</button>` : ''}
               <button onclick="openProjectReview(${projectId},'${path.replace(/'/g,"\\'")}')" class="btn px-3 py-1.5 gradient-blue text-white text-xs rounded-lg hover:opacity-90">Rescan</button>
             </div>
           </div>
@@ -1682,6 +1683,47 @@
         if(a) { if(filter==='error') b.className='filter-btn px-2 py-1 text-[10px] rounded-md bg-accent-red/15 text-accent-red'; else if(filter==='warning') b.className='filter-btn px-2 py-1 text-[10px] rounded-md bg-accent-yellow/15 text-accent-yellow'; else if(filter==='info') b.className='filter-btn px-2 py-1 text-[10px] rounded-md bg-accent-blue/15 text-accent-blue'; else b.className='filter-btn px-2 py-1 text-[10px] rounded-md bg-white/10 text-white'; }
         else b.className='filter-btn px-2 py-1 text-[10px] rounded-md text-gray-400 hover:text-white';
       }); }
+      // Re-render the currently open file / project-issues view so the filter applies everywhere
+      if (currentFile && currentFile !== '__project__') {
+        const fv = window.currentViolations[currentFile] || [];
+        const fvFiltered = severityFilter === 'all' ? fv : fv.filter(v => v.severity === severityFilter);
+        const ec=fv.filter(v=>v.severity==='error').length, wc=fv.filter(v=>v.severity==='warning').length, ic=fv.filter(v=>v.severity==='info').length;
+        const headerEl = document.getElementById('currentFileIssues');
+        if (headerEl) headerEl.textContent = severityFilter === 'all'
+          ? `${fv.length} issue${fv.length!==1?'s':''} (${ec}E ${wc}W ${ic}I)`
+          : `${fvFiltered.length} ${severityFilter}${fvFiltered.length!==1?'s':''} shown (of ${fv.length} total)`;
+        renderIssuesPanel(fvFiltered, currentFile);
+        // Re-render code view with filtered violations (lines are already fetched in DOM; simplest = re-call selectReviewFile)
+        selectReviewFile(currentFile);
+      } else if (currentFile === '__project__') {
+        showProjectIssues();
+      }
+    }
+
+    async function backfillProjectHistory(projectId) {
+      showNotification('Importing git history… this may take a moment', 'info');
+      try {
+        const res = await fetch(`/api/projects/${projectId}/backfill`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ since_days: 365 })
+        });
+        const data = await res.json();
+        if (!data.success) {
+          showNotification(data.error || 'Backfill failed', 'error');
+          return;
+        }
+        const results = data.results || [];
+        const totalCommits = results.reduce((s, r) => s + (r.commits_imported || 0), 0);
+        const totalBranches = Math.max(0, ...results.map(r => r.branches_found || 0));
+        const totalUsers = results.filter(r => (r.commits_imported || 0) > 0).length;
+        showNotification(
+          `Backfilled ${totalCommits} commits across ${totalBranches} branches for ${totalUsers} developer(s)`,
+          'success'
+        );
+      } catch (e) {
+        showNotification('Error: ' + e.message, 'error');
+      }
     }
 
     async function switchReviewBranch(branch, projectId, path) {
@@ -1704,17 +1746,21 @@
       document.getElementById('codeContent').classList.remove('hidden');
       document.getElementById('codeContent').classList.add('flex');
       document.getElementById('fileTree').innerHTML = renderFileTree(buildFileTree(currentReviewData.files, currentReviewData.violations));
-      const fileName = filePath.split(/[\\/]/).pop();
       const fv = window.currentViolations[filePath] || [];
+      // Apply the current severity filter to everything shown for this file
+      const fvFiltered = severityFilter === 'all' ? fv : fv.filter(v => v.severity === severityFilter);
       document.getElementById('currentFileName').textContent = filePath;
       const ec=fv.filter(v=>v.severity==='error').length, wc=fv.filter(v=>v.severity==='warning').length, ic=fv.filter(v=>v.severity==='info').length;
-      document.getElementById('currentFileIssues').textContent = `${fv.length} issue${fv.length!==1?'s':''} (${ec}E ${wc}W ${ic}I)`;
-      renderIssuesPanel(fv, filePath);
+      const header = severityFilter === 'all'
+        ? `${fv.length} issue${fv.length!==1?'s':''} (${ec}E ${wc}W ${ic}I)`
+        : `${fvFiltered.length} ${severityFilter}${fvFiltered.length!==1?'s':''} shown (of ${fv.length} total)`;
+      document.getElementById('currentFileIssues').textContent = header;
+      renderIssuesPanel(fvFiltered, filePath);
       try {
         const url = `/api/file-content?path=${encodeURIComponent(filePath)}&project_id=${currentReviewData.project_id||''}&t=${Date.now()}`;
         const res = await fetch(url); const data = await res.json();
         if(data.error) document.getElementById('codeBody').innerHTML=`<tr><td colspan="2" class="p-4 text-gray-500 text-xs">${data.error}</td></tr>`;
-        else renderCodeView(data.lines||[], fv);
+        else renderCodeView(data.lines||[], fvFiltered);
       } catch(e) { document.getElementById('codeBody').innerHTML=`<tr><td colspan="2" class="p-4 text-gray-500 text-xs">${e.message}</td></tr>`; }
     }
 

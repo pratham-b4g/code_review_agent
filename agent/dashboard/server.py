@@ -527,23 +527,42 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 
                 # Filter branches based on user role
                 if user_role == 'developer':
-                    # For developers, only show branches they own (based on analytics data)
-                    # Get analytics to find which branches this developer pushed to
-                    analytics = db.get_analytics(user_email=user_email, project_id=project_id)
+                    # For developers: include branches where they have (a) analytics entries,
+                    # (b) actual git commits (authored), or (c) username-in-branch-name match.
                     developer_branches = set()
+
+                    # (a) Branches with logged analytics
+                    analytics = db.get_analytics(user_email=user_email, project_id=project_id)
                     for a in analytics:
                         if a.get('branch'):
                             developer_branches.add(a.get('branch'))
-                    
-                    # Also check for branches with developer's email/username in name
-                    for branch in branches:
-                        if user_email.split('@')[0].lower() in branch.lower():
-                            developer_branches.add(branch)
-                    
-                    # Filter to only developer's branches
-                    branches = [b for b in branches if b in developer_branches]
+
+                    # (b) Branches with git commits authored by this developer
+                    try:
+                        from agent.analytics import get_tracker
+                        tracker = get_tracker()
+                        if os.path.exists(project_path):
+                            for b in branches:
+                                commits = tracker.get_commits_for_user_on_branch(
+                                    project_path, b, user_email, since_days=365
+                                )
+                                if commits:
+                                    developer_branches.add(b)
+                    except Exception as e:
+                        print(f"[Branches] git commit scan error: {e}")
+
+                    # (c) Username in branch name
+                    uname = user_email.split('@')[0].lower()
+                    for b in branches:
+                        if uname and uname in b.lower():
+                            developer_branches.add(b)
+
+                    all_branches_for_dev = branches  # keep full list for fallback
+                    branches = [b for b in all_branches_for_dev if b in developer_branches]
                     if not branches:
-                        branches = ['main']  # Always allow main
+                        # No authored commits yet — let dev work on any branch rather than
+                        # locking them to main alone.
+                        branches = all_branches_for_dev or ['main']
                 
                 # TL and super_admin see all branches
                 self._json_response({
@@ -942,6 +961,59 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
+        # Backfill git history for a project (TL/super_admin) — optionally filter to one user_email
+        if path.startswith("/api/projects/") and path.endswith("/backfill"):
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            if _current_user.get("role") not in ("super_admin", "admin"):
+                self._json_response({"error": "Forbidden"}, 403)
+                return
+            try:
+                parts = path.split("/")
+                project_id = int(parts[3])
+                db = _get_db()
+                projects = db.get_all_projects()
+                project = next((p for p in projects if p['id'] == project_id), None)
+                if not project:
+                    self._json_response({"error": "Project not found"}, 404)
+                    return
+                project_path = project.get('path')
+                if not project_path or not os.path.exists(project_path):
+                    self._json_response({
+                        "error": f"Project path not accessible: {project_path}. "
+                                 "Clone the repo locally (or have each dev run `cra scan` inside it) then retry."
+                    }, 400)
+                    return
+
+                from agent.analytics import get_tracker
+                tracker = get_tracker()
+                # Determine which users to backfill
+                target_email = data.get("user_email")
+                if target_email:
+                    targets = [target_email]
+                else:
+                    # All users assigned to this project
+                    assignments = db.get_project_assignments(project_id) if hasattr(db, 'get_project_assignments') else []
+                    targets = [a.get('user_email') for a in assignments if a.get('user_email')]
+                    if not targets:
+                        # Fallback: use all authors from git log on any branch
+                        targets = []
+
+                results = []
+                for email in targets:
+                    summary = tracker.backfill_user_history(
+                        project_id=project_id,
+                        project_path=project_path,
+                        user_email=email,
+                        since_days=int(data.get("since_days", 365))
+                    )
+                    results.append({"user_email": email, **summary})
+                self._json_response({"success": True, "results": results})
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
         # Assign user to project (super admin or TL only)
         if path == "/api/project-assignments":
             if not _current_user:
@@ -981,7 +1053,28 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                             data.get("role", "developer")
                         )
 
-                self._json_response({"success": success})
+                # Backfill git history so analytics + branches appear immediately
+                backfill_summary = None
+                if success:
+                    try:
+                        project_path = None
+                        for p in projects:
+                            if p['id'] == data.get("project_id"):
+                                project_path = p.get('path')
+                                break
+                        if project_path and os.path.exists(project_path):
+                            from agent.analytics import get_tracker
+                            tracker = get_tracker()
+                            backfill_summary = tracker.backfill_user_history(
+                                project_id=data.get("project_id"),
+                                project_path=project_path,
+                                user_email=data.get("user_email"),
+                                since_days=365
+                            )
+                    except Exception as e:
+                        print(f"[Assign] backfill error: {e}")
+
+                self._json_response({"success": success, "backfill": backfill_summary})
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
             return

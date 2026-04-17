@@ -206,6 +206,195 @@ class AnalyticsTracker:
         else:
             return max(0.0, 100 - density * 5)
 
+    def list_project_branches(self, project_path: str) -> List[str]:
+        """List all local/remote branches for a project path (local clone)."""
+        if not project_path or not os.path.exists(project_path):
+            return []
+        branches = set()
+        try:
+            # Remote branches
+            result = subprocess.run(
+                ["git", "-C", project_path, "branch", "-r"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    line = line.strip()
+                    if not line or "->" in line:
+                        continue
+                    b = line.replace("origin/", "", 1)
+                    if b:
+                        branches.add(b)
+            # Local branches
+            result = subprocess.run(
+                ["git", "-C", project_path, "branch"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    b = line.replace("*", "").strip()
+                    if b:
+                        branches.add(b)
+        except Exception as e:
+            print(f"[Analytics] list_project_branches error: {e}")
+        return sorted(branches)
+
+    def get_commits_for_user_on_branch(self, project_path: str, branch: str,
+                                        user_email: str, since_days: int = 365) -> List[Dict[str, Any]]:
+        """Get all commits by a user on a specific branch, grouped per-commit with stats."""
+        if not project_path or not os.path.exists(project_path):
+            return []
+        try:
+            since = f"{since_days}.days.ago"
+            ref = f"origin/{branch}" if branch else "HEAD"
+            # Fall back to local branch name if remote ref doesn't exist
+            check = subprocess.run(
+                ["git", "-C", project_path, "rev-parse", "--verify", ref],
+                capture_output=True, text=True, timeout=10
+            )
+            if check.returncode != 0:
+                ref = branch
+                check = subprocess.run(
+                    ["git", "-C", project_path, "rev-parse", "--verify", ref],
+                    capture_output=True, text=True, timeout=10
+                )
+                if check.returncode != 0:
+                    return []
+
+            cmd = [
+                "git", "-C", project_path, "log", ref,
+                f"--author={user_email}",
+                f"--since={since}",
+                "--no-merges",
+                "--pretty=format:%H|%an|%ae|%ad",
+                "--date=short",
+                "--shortstat",
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                return []
+
+            commits = []
+            lines = result.stdout.splitlines()
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                if not line:
+                    i += 1
+                    continue
+                if "|" in line and line.count("|") >= 3:
+                    parts = line.split("|")
+                    entry = {
+                        "hash": parts[0],
+                        "author_name": parts[1],
+                        "author_email": parts[2],
+                        "date": parts[3],
+                        "files_changed": 0,
+                        "insertions": 0,
+                        "deletions": 0,
+                    }
+                    # Look ahead for shortstat line
+                    if i + 1 < len(lines):
+                        stat_line = lines[i + 1].strip()
+                        if "changed" in stat_line or "insertion" in stat_line or "deletion" in stat_line:
+                            files_m = re.search(r"(\d+) file", stat_line)
+                            ins_m = re.search(r"(\d+) insertion", stat_line)
+                            del_m = re.search(r"(\d+) deletion", stat_line)
+                            if files_m:
+                                entry["files_changed"] = int(files_m.group(1))
+                            if ins_m:
+                                entry["insertions"] = int(ins_m.group(1))
+                            if del_m:
+                                entry["deletions"] = int(del_m.group(1))
+                            i += 1  # consume stat line
+                    commits.append(entry)
+                i += 1
+            return commits
+        except Exception as e:
+            print(f"[Analytics] get_commits_for_user_on_branch error on {branch}: {e}")
+            return []
+
+    def backfill_user_history(self, project_id: int, project_path: str,
+                              user_email: str, since_days: int = 365) -> Dict[str, Any]:
+        """Walk git history for a user across ALL branches and populate
+        developer_analytics so analytics shows up immediately after a
+        developer is assigned to an existing project.
+
+        Returns a summary dict: {branches_found, commits_imported, days_logged}.
+        """
+        summary = {"branches_found": 0, "commits_imported": 0, "days_logged": 0,
+                   "branches": [], "errors": []}
+        if not project_path or not os.path.exists(project_path):
+            summary["errors"].append(
+                f"Project path not accessible locally for backfill: {project_path}. "
+                "Clone the repo locally and re-run."
+            )
+            return summary
+
+        # Ensure origin refs are up to date if this is a git repo with a remote
+        try:
+            subprocess.run(
+                ["git", "-C", project_path, "fetch", "--all", "--prune"],
+                capture_output=True, text=True, timeout=60
+            )
+        except Exception:
+            pass  # fetch failure shouldn't block backfill
+
+        branches = self.list_project_branches(project_path)
+        summary["branches_found"] = len(branches)
+        summary["branches"] = branches
+
+        for branch in branches:
+            commits = self.get_commits_for_user_on_branch(
+                project_path, branch, user_email, since_days=since_days
+            )
+            if not commits:
+                continue
+
+            # Group commits by date → aggregate per (branch, date)
+            per_day: Dict[str, Dict[str, int]] = {}
+            for c in commits:
+                d_str = c.get("date") or ""
+                if not d_str:
+                    continue
+                bucket = per_day.setdefault(d_str, {
+                    "commits": 0, "insertions": 0, "deletions": 0, "files": 0,
+                })
+                bucket["commits"] += 1
+                bucket["insertions"] += c.get("insertions", 0)
+                bucket["deletions"] += c.get("deletions", 0)
+                bucket["files"] += c.get("files_changed", 0)
+
+            for d_str, stats in per_day.items():
+                try:
+                    target_date = datetime.strptime(d_str, "%Y-%m-%d").date()
+                except Exception:
+                    continue
+                total_lines = stats["insertions"] + stats["deletions"]
+                # No quality scan for historical commits; use neutral placeholders.
+                quality = 100.0
+                effort = min(100.0, stats["commits"] * 10 + min(stats["files"] * 2, 20)
+                             + min(total_lines / 10, 20))
+                ok = self.db.log_analytics(
+                    user_email=user_email,
+                    project_id=project_id,
+                    date=target_date,
+                    branch=branch,
+                    commits_count=stats["commits"],
+                    lines_added=stats["insertions"],
+                    lines_removed=stats["deletions"],
+                    issues_found=0,
+                    bugs_fixed=0,
+                    files_changed=stats["files"],
+                    code_quality_score=quality,
+                    effort_score=effort,
+                )
+                if ok:
+                    summary["days_logged"] += 1
+            summary["commits_imported"] += len(commits)
+
+        return summary
+
     def track_daily_activity(self, project_id: int, project_path: str,
                             user_email: str, target_date: Optional[date] = None) -> bool:
         """Track and store daily activity for a developer."""
