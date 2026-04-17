@@ -1073,15 +1073,14 @@
 
     async function loadAnalyticsView(panel) {
       const isDev = currentRole === 'developer';
-      const branchHelpText = analyticsBranch === 'all'
-        ? 'Issues summed across ALL branches in selected period'
-        : `Issues on <b class="text-accent-blue">${analyticsBranch}</b> branch`;
+      // Analytics is multi-project: branch filter is removed here.
+      // Force all-branches aggregation on the server.
+      analyticsBranch = 'all';
       panel.innerHTML = `
         <div class="p-6 fade-in">
           <div class="flex justify-between items-center mb-2">
             <h2 class="text-lg font-bold text-white">${isDev ? 'My Activity' : 'Team Analytics'}</h2>
             <div class="flex items-center gap-2">
-              ${!isDev ? `<select id="analyticsBranch" onchange="changeAnalyticsBranch(this.value)" class="search-input rounded-lg px-3 py-1.5 text-xs text-white"><option value="all" ${analyticsBranch==='all'?'selected':''}>All Branches</option></select>` : ''}
               <span id="analyticsScanStatus" class="hidden text-[11px] px-2.5 py-1 rounded-full bg-accent-blue/10 text-accent-blue border border-accent-blue/20"></span>
               <button onclick="refreshAnalytics(false)" class="btn px-3 py-1.5 bg-white/5 text-gray-300 rounded-lg hover:bg-white/10 text-xs border border-border-subtle">Refresh</button>
               <button onclick="refreshAnalytics(true)" title="Force a full rescan of every branch in scope — slower" class="btn px-3 py-1.5 bg-accent-purple/10 text-accent-purple rounded-lg hover:bg-accent-purple/20 text-xs border border-accent-purple/20">Force Rescan</button>
@@ -1095,10 +1094,10 @@
               </button>
             `).join('')}
           </div>
-          <p class="text-[11px] text-gray-500 mb-5" id="analyticsScope">Scope: ${branchHelpText}</p>
+          <p class="text-[11px] text-gray-500 mb-5" id="analyticsScope">Open issues deduplicated across all branches per project. Commits filtered by time window below.</p>
           <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
             <div class="card stat-card blue p-4"><div class="text-2xl font-bold text-white" id="statCommits">-</div><div class="text-xs text-gray-500 mt-1">Commits</div></div>
-            <div class="card stat-card red p-4" title="MAX issues across branches per project, summed across projects. Never double-counts the same file on multiple branches."><div class="text-2xl font-bold text-white" id="statIssues">-</div><div class="text-xs text-gray-500 mt-1" id="statIssuesLabel">Issues (worst branch)</div></div>
+            <div class="card stat-card red p-4" title="Deduplicated open issues. Same issue on multiple branches counts once. Issues fixed in the current branch are excluded."><div class="text-2xl font-bold text-white" id="statIssues">-</div><div class="text-xs text-gray-500 mt-1" id="statIssuesLabel">Open Issues</div></div>
             <div class="card stat-card green p-4"><div class="text-2xl font-bold text-white" id="statQuality">-</div><div class="text-xs text-gray-500 mt-1">Quality Score</div></div>
             <div class="card stat-card yellow p-4"><div class="text-2xl font-bold text-white" id="statEffort">-</div><div class="text-xs text-gray-500 mt-1">Effort Score</div></div>
           </div>
@@ -1111,7 +1110,7 @@
                     <th class="px-4 py-2.5 text-xs font-medium text-gray-400">Developer</th>
                     <th class="px-4 py-2.5 text-xs font-medium text-gray-400 text-center">Projects</th>
                     <th class="px-4 py-2.5 text-xs font-medium text-gray-400 text-center">Commits</th>
-                    <th class="px-4 py-2.5 text-xs font-medium text-gray-400 text-center" title="Max issues on files this developer touched (across their active branches). Derived from git log + latest scans — no double-counting.">Issues</th>
+                    <th class="px-4 py-2.5 text-xs font-medium text-gray-400 text-center" title="Deduped open issues on files this developer touched. Issues fixed in the current branch are excluded.">Issues</th>
                     <th class="px-4 py-2.5 text-xs font-medium text-gray-400 text-center">Quality</th>
                     <th class="px-4 py-2.5 text-xs font-medium text-gray-400">Current Branch</th>
                     <th class="px-4 py-2.5 text-xs font-medium text-gray-400">All Branches (issues)</th>
@@ -1205,39 +1204,21 @@
         document.getElementById('statQuality').textContent = (analyticsData.avg_quality || 0) + '%';
         document.getElementById('statEffort').textContent = analyticsData.avg_effort || 0;
 
-        // Update issues label with scope clarity
-        const issuesLabel = document.getElementById('statIssuesLabel');
-        if (issuesLabel) {
-          issuesLabel.textContent = analyticsBranch === 'all'
-            ? `Issues (worst branch per project)`
-            : `Issues on ${analyticsBranch}`;
-        }
-        // Update scope explanation
+        // Scope explanation: per-project deduped totals + current branch + per-branch raw
         const scope = document.getElementById('analyticsScope');
         if (scope) {
           const projSummary = analyticsData.project_summary || [];
           const perBranchHint = projSummary.length
             ? projSummary.map(p => {
-                const perBranch = (p.branches||[]).map(b => `<span class="mono text-[10px]">${b.branch}:${b.issues}</span>`).join(' · ');
-                return `<div class="text-[10px] text-gray-500"><b class="text-gray-300">${p.project_name}</b> — worst: <b class="text-accent-red">${p.max_branch} (${p.max_issues})</b> · all: ${perBranch}</div>`;
+                const perBranch = (p.branches||[]).map(b =>
+                  `<span class="mono text-[10px] ${b.is_current?'text-accent-green':''}">${b.branch}:${b.issues}${b.is_current?'*':''}</span>`
+                ).join(' · ');
+                return `<div class="text-[10px] text-gray-500 mt-0.5"><b class="text-gray-300">${p.project_name}</b> — current: <b class="text-accent-green">${p.current_branch || '-'}</b> · deduped open: <b class="text-accent-red">${p.deduped_total ?? 0}</b> · raw per-branch: ${perBranch}</div>`;
               }).join('')
             : '';
           const winLabel = analyticsData.filter_label || analyticsFilter;
-          const headline = analyticsBranch === 'all'
-            ? `Total issues = <b class="text-accent-red">MAX</b> across branches per project, summed across projects. Developer "Issues" = max attributed issues across branches (file-touch based). Window: <b>${winLabel}</b>.`
-            : `Filtering to <b class="text-accent-blue">${analyticsBranch}</b> branch only. Window: <b>${winLabel}</b>.`;
+          const headline = `Open issues = union across branches, deduped by file, issues <b>fixed in current branch excluded</b>. Developer commits window: <b class="text-accent-blue">${winLabel}</b>.`;
           scope.innerHTML = headline + perBranchHint;
-        }
-
-        // Populate branch dropdown from actual developer data
-        const branchSelect = document.getElementById('analyticsBranch');
-        if (branchSelect && analyticsData.developers) {
-          const allBranches = new Set();
-          analyticsData.developers.forEach(d => (d.branches || []).forEach(b => allBranches.add(b)));
-          const sortedBranches = Array.from(allBranches).sort();
-          const currentVal = branchSelect.value;
-          branchSelect.innerHTML = `<option value="all" ${analyticsBranch==='all'?'selected':''}>All Branches</option>` +
-            sortedBranches.map(b => `<option value="${b}" ${b===analyticsBranch?'selected':''}>${b}</option>`).join('');
         }
 
         if (currentRole !== 'developer' && analyticsData.developers) {
@@ -1349,7 +1330,7 @@
                   <span class="text-gray-400">Commits: <b class="text-white">${b.commits||0}</b></span>
                   <span class="${(b.issues||0)>0?'text-accent-red':'text-gray-400'}">Issues: <b>${b.issues||0}</b> ${evwiBreakdown}</span>
                   ${b.quality !== null && b.quality !== undefined ? `<span class="text-gray-400">Quality: <b class="text-white">${b.quality}%</b></span>` : ''}
-                  <button onclick="closeModal('branchDetailsModal'); openProjectReviewBranch(${pg.project_id}, '${b.name.replace(/'/g,"\\'")}')"
+                  <button onclick="closeModal('branchDetailsModal'); openProjectReviewBranch(${pg.project_id}, '${b.name.replace(/'/g,"\\'")}', '${dev.email}')"
                           class="text-accent-blue hover:text-white text-[10px] underline">View Code</button>
                 </div>
               </div>
@@ -1394,8 +1375,8 @@
       `);
     }
 
-    // Helper: open project review at a specific branch
-    async function openProjectReviewBranch(projectId, branch) {
+    // Helper: open project review at a specific branch (optionally as a dev)
+    async function openProjectReviewBranch(projectId, branch, viewAsEmail) {
       try {
         const projectsUrl = currentRole === 'super_admin' ? '/api/projects' : '/api/my-projects';
         const res = await fetch(`${projectsUrl}?t=${Date.now()}`);
@@ -1403,7 +1384,7 @@
         const p = (projects || []).find(x => x.id === projectId);
         if (!p) { showNotification('Project not accessible', 'error'); return; }
         showNotification(`Opening ${p.name || 'project'} @ ${branch}...`, 'info');
-        openProjectReview(p.id, p.path);
+        openProjectReview(p.id, p.path, viewAsEmail);
         // Switch to specific branch after scan loads
         setTimeout(() => { if (typeof switchReviewBranch === 'function') switchReviewBranch(branch, p.id, p.path); }, 800);
       } catch (e) { showNotification('Error: ' + e.message, 'error'); }
@@ -1643,23 +1624,71 @@
     }
 
     // ── View Developer Code ─────────────────────────────────────
+    // Opens a project picker limited to projects where this developer is
+    // assigned; then opens that project with branches scoped to theirs.
     async function viewDeveloperCode(email, name) {
       try {
-        // Super admin has access to ALL projects; TLs/devs use my-projects.
-        const projectsUrl = currentRole === 'super_admin'
-          ? `/api/projects?t=${Date.now()}`
-          : `/api/my-projects?t=${Date.now()}`;
-        const myProjectsRes = await fetch(projectsUrl);
-        const myProjects = await myProjectsRes.json();
-        let developerProject = null;
-        for (const project of myProjects) {
-          const assignmentsRes = await fetch(`/api/projects/${project.id}/assignments?t=${Date.now()}`);
-          const assignments = await assignmentsRes.json();
-          if (assignments.some(a => a.email === email)) { developerProject = project; break; }
+        // Prefer the developer's projects from analytics (already scoped).
+        let devProjects = [];
+        const dev = (analyticsData?.developers || []).find(d => d.email === email);
+        if (dev && Array.isArray(dev.branch_stats) && dev.branch_stats.length) {
+          const seen = new Set();
+          dev.branch_stats.forEach(b => {
+            if (b.project_id && !seen.has(b.project_id)) {
+              seen.add(b.project_id);
+              devProjects.push({ id: b.project_id, name: b.project_name });
+            }
+          });
         }
-        if (!developerProject) { showNotification(`${name} not in your projects`, 'error'); return; }
-        showNotification(`Opening ${name}'s code...`, 'info');
-        openProjectReview(developerProject.id, developerProject.path);
+
+        // Fallback: probe assignments on accessible projects
+        if (!devProjects.length) {
+          const projectsUrl = currentRole === 'super_admin'
+            ? `/api/projects?t=${Date.now()}`
+            : `/api/my-projects?t=${Date.now()}`;
+          const myProjects = await (await fetch(projectsUrl)).json();
+          for (const project of myProjects) {
+            const assignments = await (await fetch(`/api/projects/${project.id}/assignments?t=${Date.now()}`)).json();
+            if (assignments.some(a => a.email === email)) {
+              devProjects.push({ id: project.id, name: project.name, path: project.path });
+            }
+          }
+        }
+
+        if (!devProjects.length) { showNotification(`${name} is not assigned to any accessible project`, 'error'); return; }
+
+        // Need path to open; resolve from the full project list.
+        const projectsAll = await (await fetch(`${currentRole === 'super_admin' ? '/api/projects' : '/api/my-projects'}?t=${Date.now()}`)).json();
+        const hydrated = devProjects.map(dp => {
+          const hit = (projectsAll || []).find(p => p.id === dp.id);
+          return hit ? { ...dp, path: hit.path, name: hit.name || dp.name } : dp;
+        }).filter(dp => dp.path);
+
+        if (!hydrated.length) { showNotification(`No accessible project found for ${name}`, 'error'); return; }
+
+        if (hydrated.length === 1) {
+          const p = hydrated[0];
+          showNotification(`Opening ${name}'s code in ${p.name}...`, 'info');
+          openProjectReview(p.id, p.path, email);
+          return;
+        }
+
+        // Multiple projects → prompt user
+        showModal('pickDevProjectModal', `
+          <h3 class="text-lg font-bold text-white mb-1">Open ${name}'s code</h3>
+          <p class="text-xs text-gray-500 mb-3">They work on <b class="text-white">${hydrated.length}</b> projects. Pick one:</p>
+          <div class="space-y-2 max-h-[400px] overflow-y-auto">
+            ${hydrated.map(p => `
+              <button onclick="closeModal('pickDevProjectModal'); openProjectReview(${p.id}, '${(p.path||'').replace(/'/g,"\\'")}', '${email}')"
+                      class="w-full text-left card p-3 hover:border-accent-blue/40 transition">
+                <div class="text-sm text-white font-medium">${p.name}</div>
+                <div class="text-[10px] text-gray-500 mono truncate">${p.path || ''}</div>
+              </button>`).join('')}
+          </div>
+          <div class="mt-4 flex justify-end">
+            <button onclick="closeModal('pickDevProjectModal')" class="btn px-4 py-2 bg-white/5 text-gray-300 text-sm rounded-lg hover:bg-white/10 border border-border-subtle">Cancel</button>
+          </div>
+        `);
       } catch (e) { showNotification('Error: ' + e.message, 'error'); }
     }
 
@@ -1691,7 +1720,12 @@
     // ── Code Review ─────────────────────────────────────────────
     let currentReviewData = null, currentFile = null, severityFilter = 'all';
 
-    async function openProjectReview(projectId, path) {
+    // Track "view as developer" scope — when set, branch list is scoped to
+    // that developer's commits. Cleared when navigating away.
+    let reviewViewAsEmail = null;
+
+    async function openProjectReview(projectId, path, viewAsEmail) {
+      reviewViewAsEmail = viewAsEmail || null;
       const panel = document.getElementById('contentPanel');
       panel.innerHTML = `<div class="flex flex-col items-center justify-center h-full"><div class="w-10 h-10 border-3 border-accent-blue border-t-transparent rounded-full animate-spin mb-3"></div><p class="text-sm text-gray-400">Scanning project...</p><p class="text-xs text-gray-600 mt-1">This may take a moment for remote repos</p></div>`;
       try {
@@ -1705,13 +1739,22 @@
 
     async function fetchProjectBranches(projectId, selectedBranch) {
       try {
-        const res = await fetch(`/api/projects/${projectId}/branches?t=${Date.now()}`);
+        const qp = new URLSearchParams({ t: Date.now() });
+        if (reviewViewAsEmail) qp.set('user_email', reviewViewAsEmail);
+        const res = await fetch(`/api/projects/${projectId}/branches?${qp.toString()}`);
         const data = await res.json();
         const select = document.getElementById('reviewBranch');
         if (!select) return;
         const branches = data.branches || ['main'];
-        const activeBranch = selectedBranch || 'main';
+        const activeBranch = selectedBranch || branches[0] || 'main';
         select.innerHTML = branches.map(b => `<option value="${b}" ${b===activeBranch?'selected':''}>${b}</option>`).join('');
+        // Banner in header when viewing another user
+        const header = document.getElementById('viewAsBanner');
+        if (header) {
+          header.innerHTML = reviewViewAsEmail
+            ? `<span class="text-[10px] px-2 py-0.5 rounded bg-accent-purple/15 text-accent-purple border border-accent-purple/30">Viewing as ${reviewViewAsEmail} · ${branches.length} branch${branches.length!==1?'es':''}</span>`
+            : '';
+        }
       } catch (e) {
         const select = document.getElementById('reviewBranch');
         if (select) select.innerHTML = '<option value="main" selected>main</option>';
@@ -1735,7 +1778,10 @@
             <div class="flex items-center gap-3">
               <button onclick="loadView('my-projects')" class="text-gray-400 hover:text-white"><svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg></button>
               <div>
-                <h2 class="text-sm font-bold text-white">${result.project_name || 'Project'}</h2>
+                <div class="flex items-center gap-2">
+                  <h2 class="text-sm font-bold text-white">${result.project_name || 'Project'}</h2>
+                  <span id="viewAsBanner"></span>
+                </div>
                 <p class="text-[10px] text-gray-500 mono">${result.language || ''} ${result.framework ? '/ '+result.framework : ''}</p>
               </div>
             </div>

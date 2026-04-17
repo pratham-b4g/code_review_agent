@@ -786,41 +786,103 @@ class AnalyticsTracker:
                 scans = self.db.get_project_scans(project_id=p['id']) if hasattr(self.db, 'get_project_scans') else []
                 scans_by_project[p['id']] = scans
 
-            # ── 4. Project-level issue totals (MAX across branches) ──
-            #     Also collect per-branch breakdown for UI transparency.
+            # ── 4. Project-level issue totals (UNION-DEDUPE minus FIXED) ──
+            #   Policy: treat the most-recently-scanned branch (preferring
+            #   main/master/develop) as the "current" baseline. For each file
+            #   that still has issues in the current branch, use the MAX
+            #   issue count for that file across all branches. Files that
+            #   are fixed in the current branch (i.e. no longer listed) are
+            #   EXCLUDED — the work has been merged or resolved.
             project_issue_summary: List[Dict[str, Any]] = []
-            total_issues_max = 0
-            total_errors_max = 0
-            total_warnings_max = 0
-            total_infos_max = 0
+            project_current_branch: Dict[int, str] = {}
+            project_unified: Dict[int, Dict[str, Dict[str, int]]] = {}
+            total_issues = 0
+            total_errors = 0
+            total_warnings = 0
+            total_infos = 0
+
+            def _load_files_with_issues(scan) -> Dict[str, Dict[str, int]]:
+                raw = scan.get('files_with_issues') or {}
+                if isinstance(raw, str):
+                    try:
+                        raw = json.loads(raw)
+                    except Exception:
+                        raw = {}
+                return raw if isinstance(raw, dict) else {}
+
             for p in projects_scope:
                 scans = scans_by_project.get(p['id'], [])
                 if not scans:
                     continue
-                # Optional branch filter
+                # Optional UI branch filter: lock to that one branch only
                 scans_filt = [s for s in scans if (branch is None or s['branch'] == branch)]
                 if not scans_filt:
                     continue
-                max_scan = max(scans_filt, key=lambda s: s.get('total_issues', 0))
-                total_issues_max += int(max_scan.get('total_issues', 0) or 0)
-                total_errors_max += int(max_scan.get('errors', 0) or 0)
-                total_warnings_max += int(max_scan.get('warnings', 0) or 0)
-                total_infos_max += int(max_scan.get('infos', 0) or 0)
+
+                # Pick the "current" branch for dedupe reference
+                pref = ['main', 'master', 'develop', 'dev']
+                branch_map = {s['branch']: s for s in scans_filt}
+                current_br = next((b for b in pref if b in branch_map), None)
+                if not current_br:
+                    latest = max(scans_filt, key=lambda s: str(s.get('scanned_at') or ''))
+                    current_br = latest['branch']
+                current_scan = branch_map[current_br]
+                current_files = _load_files_with_issues(current_scan)
+
+                # Build unified file map: present-in-current ∩ MAX across branches
+                unified: Dict[str, Dict[str, int]] = {}
+                for fp, cur_bucket in current_files.items():
+                    best = {
+                        'total':    int(cur_bucket.get('total', 0) or 0),
+                        'errors':   int(cur_bucket.get('errors', 0) or 0),
+                        'warnings': int(cur_bucket.get('warnings', 0) or 0),
+                        'infos':    int(cur_bucket.get('infos', 0) or 0),
+                    }
+                    for s in scans_filt:
+                        if s['branch'] == current_br:
+                            continue
+                        other = _load_files_with_issues(s).get(fp)
+                        if other and int(other.get('total', 0) or 0) > best['total']:
+                            best = {
+                                'total':    int(other.get('total', 0) or 0),
+                                'errors':   int(other.get('errors', 0) or 0),
+                                'warnings': int(other.get('warnings', 0) or 0),
+                                'infos':    int(other.get('infos', 0) or 0),
+                            }
+                    unified[fp] = best
+
+                proj_total    = sum(b['total']    for b in unified.values())
+                proj_errors   = sum(b['errors']   for b in unified.values())
+                proj_warnings = sum(b['warnings'] for b in unified.values())
+                proj_infos    = sum(b['infos']    for b in unified.values())
+
+                total_issues    += proj_total
+                total_errors    += proj_errors
+                total_warnings  += proj_warnings
+                total_infos     += proj_infos
+
+                project_current_branch[p['id']] = current_br
+                project_unified[p['id']] = unified
+
                 project_issue_summary.append({
-                    'project_id': p['id'],
-                    'project_name': p.get('name'),
-                    'max_branch': max_scan['branch'],
-                    'max_issues': int(max_scan.get('total_issues', 0) or 0),
+                    'project_id':    p['id'],
+                    'project_name':  p.get('name'),
+                    'current_branch': current_br,
+                    'deduped_total': proj_total,
+                    'deduped_errors': proj_errors,
+                    'deduped_warnings': proj_warnings,
+                    'deduped_infos':    proj_infos,
                     'branches': [
                         {
-                            'branch': s['branch'],
-                            'issues': int(s.get('total_issues', 0) or 0),
-                            'errors': int(s.get('errors', 0) or 0),
+                            'branch':  s['branch'],
+                            'issues':  int(s.get('total_issues', 0) or 0),
+                            'errors':  int(s.get('errors', 0) or 0),
                             'warnings': int(s.get('warnings', 0) or 0),
-                            'infos': int(s.get('infos', 0) or 0),
+                            'infos':   int(s.get('infos', 0) or 0),
                             'scanned_at': (s.get('scanned_at').isoformat()
                                            if hasattr(s.get('scanned_at'), 'isoformat')
                                            else str(s.get('scanned_at'))),
+                            'is_current': s['branch'] == current_br,
                         }
                         for s in scans_filt
                     ],
@@ -862,9 +924,12 @@ class AnalyticsTracker:
                             dev_latest_date = act['latest_commit_date']
                             dev_current_branch = act.get('current_branch')
 
-                    # For each branch the dev has commits on, intersect touched
-                    # files with the latest scan's files_with_issues on THAT branch.
+                    # For each branch the dev has commits on, attribute issues
+                    # using the UNIFIED (deduped, fixed-excluded) file map for
+                    # the project. This keeps per-dev totals aligned with
+                    # project totals and never double-counts or counts fixed work.
                     scans_map = {s['branch']: s for s in scans_by_project.get(p['id'], [])}
+                    unified_files = project_unified.get(p['id'], {})
                     for br_info in act.get('branches', []):
                         br_name = br_info['name']
                         touched = self.get_files_touched_by_user(
@@ -873,15 +938,9 @@ class AnalyticsTracker:
                         scan = scans_map.get(br_name)
                         attributed = 0
                         attr_errors = attr_warns = attr_infos = 0
-                        if scan and touched:
-                            files_with_issues = scan.get('files_with_issues') or {}
-                            if isinstance(files_with_issues, str):
-                                try:
-                                    files_with_issues = json.loads(files_with_issues)
-                                except Exception:
-                                    files_with_issues = {}
+                        if touched and unified_files:
                             for fp in touched:
-                                bucket = files_with_issues.get(fp)
+                                bucket = unified_files.get(fp)
                                 if bucket:
                                     attributed += int(bucket.get('total', 0))
                                     attr_errors += int(bucket.get('errors', 0))
@@ -939,18 +998,18 @@ class AnalyticsTracker:
 
             return {
                 'total_commits': total_unique_commits,
-                'total_issues': total_issues_max,            # MAX across branches (project totals)
-                'total_errors': total_errors_max,
-                'total_warnings': total_warnings_max,
-                'total_infos': total_infos_max,
+                'total_issues': total_issues,                # union-dedupe minus fixed
+                'total_errors': total_errors,
+                'total_warnings': total_warnings,
+                'total_infos': total_infos,
                 'avg_quality': avg_quality,
                 'avg_effort': 0,
                 'developers': developers,
-                'project_summary': project_issue_summary,    # per-project, per-branch breakdown
+                'project_summary': project_issue_summary,    # per-project + current_branch + per-branch breakdown
                 'period': f"{start_date} to {end_date}",
                 'filter': filter_key or f"{days}d",
                 'filter_label': filter_label,
-                'aggregation': 'max_across_branches',
+                'aggregation': 'union_dedupe_minus_fixed',
                 'viewer_role': viewer_role,
             }
         except Exception as e:

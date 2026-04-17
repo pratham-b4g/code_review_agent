@@ -467,6 +467,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 # Get user role
                 user_role = _current_user.get("role", "developer")
                 user_email = _current_user["email"]
+                # Optional: TL/super_admin can request branches scoped to a
+                # specific developer (used by "View Developer Code")
+                filter_email = qs.get("user_email", [None])[0]
+                if filter_email and user_role in ("admin", "super_admin"):
+                    user_email = filter_email
+                    user_role = "developer"  # reuse dev-branch filtering below
                 
                 # Fetch branches from Git
                 import subprocess
