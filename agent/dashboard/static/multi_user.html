@@ -943,8 +943,8 @@
                       </div>
                     </div>
                     <div class="flex gap-2">
-                      <button onclick="respondToRequest(${r.id}, 'rejected')" class="btn px-3 py-1.5 text-xs bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 border border-accent-red/20">Reject</button>
-                      <button onclick="respondToRequest(${r.id}, 'approved', ${r.project_id || 'null'}, '${(r.requester_email||'').replace(/'/g,"\\'")}')" class="btn px-3 py-1.5 text-xs bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 border border-accent-green/20">Approve</button>
+                      <button onclick='confirmRejectRequest(${JSON.stringify(r).replace(/'/g,"&#39;")})' class="btn px-3 py-1.5 text-xs bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 border border-accent-red/20">Reject</button>
+                      <button onclick='confirmApproveRequest(${JSON.stringify(r).replace(/'/g,"&#39;")})' class="btn px-3 py-1.5 text-xs bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 border border-accent-green/20">Approve</button>
                     </div>
                   </div>
                 </div>
@@ -955,28 +955,104 @@
       } catch (e) { panel.innerHTML = `<div class="p-6 text-red-400">Error: ${e.message}</div>`; }
     }
 
-    async function respondToRequest(requestId, status, projectId, requesterEmail) {
+    // ── Approve Confirmation Modal (with role selector) ──────────
+    function confirmApproveRequest(req) {
+      const isSuper = currentRole === 'super_admin';
+      showModal('approveRequestModal', `
+        <div class="flex items-start gap-3 mb-4">
+          <div class="w-10 h-10 rounded-xl bg-accent-green/10 flex items-center justify-center shrink-0">
+            <svg class="w-5 h-5 text-accent-green" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+          </div>
+          <div>
+            <h3 class="text-lg font-bold text-white">Approve Access Request</h3>
+            <p class="text-xs text-gray-500 mt-0.5">Grant <b class="text-white">${req.requester_name}</b> (<span class="mono">${req.requester_email}</span>) access to the system${req.project_name ? ` and project <b class="text-accent-blue">${req.project_name}</b>` : ''}.</p>
+          </div>
+        </div>
+        <div class="mb-4">
+          <label class="block text-xs font-medium text-gray-400 mb-2">Grant role *</label>
+          ${isSuper ? `
+            <div class="space-y-2">
+              <label class="flex items-start gap-2 p-3 bg-bg-dark border border-border-subtle rounded-lg cursor-pointer hover:bg-bg-hover">
+                <input type="radio" name="approveRole" value="developer" checked class="mt-0.5 w-4 h-4 accent-accent-blue">
+                <div>
+                  <div class="text-sm text-white font-medium">Developer</div>
+                  <div class="text-[10px] text-gray-500">Can view assigned projects, request code reviews, and see their own analytics.</div>
+                </div>
+              </label>
+              <label class="flex items-start gap-2 p-3 bg-bg-dark border border-border-subtle rounded-lg cursor-pointer hover:bg-bg-hover">
+                <input type="radio" name="approveRole" value="admin" class="mt-0.5 w-4 h-4 accent-accent-purple">
+                <div>
+                  <div class="text-sm text-white font-medium">Team Lead (TL)</div>
+                  <div class="text-[10px] text-gray-500">Can add projects & developers, assign users, review all team code, and see team analytics.</div>
+                </div>
+              </label>
+            </div>
+          ` : `
+            <div class="p-3 bg-bg-dark border border-border-subtle rounded-lg">
+              <div class="text-sm text-white font-medium">Developer</div>
+              <div class="text-[10px] text-gray-500 mt-0.5">TLs can only approve developers. To grant TL access, ask a Super Admin.</div>
+            </div>
+            <input type="hidden" name="approveRole" value="developer">
+          `}
+        </div>
+        <div class="flex gap-2">
+          <button onclick="closeModal('approveRequestModal')" class="btn flex-1 bg-white/5 text-gray-300 py-2.5 rounded-lg hover:bg-white/10 text-sm border border-border-subtle">Cancel</button>
+          <button onclick="submitApproveRequest(${req.id})" class="btn flex-1 bg-accent-green text-white py-2.5 rounded-lg hover:bg-accent-green/90 text-sm font-medium">Confirm Approval</button>
+        </div>
+      `);
+    }
+
+    async function submitApproveRequest(requestId) {
+      const roleInput = document.querySelector('input[name="approveRole"]:checked') || document.querySelector('input[name="approveRole"]');
+      const approved_role = roleInput ? roleInput.value : 'developer';
       try {
         const res = await fetch(`/api/access-requests/${requestId}/respond`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status, responded_by: currentUser.id })
+          body: JSON.stringify({ status: 'approved', approved_role })
         });
         const data = await res.json();
         if (data.success) {
-          // If approved and a project was specified, auto-assign the requester to that project
-          if (status === 'approved' && projectId && requesterEmail) {
-            try {
-              await fetch('/api/project-assignments', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ project_id: projectId, user_email: requesterEmail, role: 'developer' })
-              });
-              showNotification(`Approved & assigned to project`, 'success');
-            } catch (assignErr) {
-              showNotification(`Approved, but failed to assign to project`, 'warning');
-            }
-          } else {
-            showNotification(`Request ${status}`, 'success');
-          }
+          showNotification(`Request approved as ${approved_role === 'admin' ? 'Team Lead' : 'Developer'}`, 'success');
+          closeModal('approveRequestModal');
+          loadView('access-requests');
+        } else { showNotification(data.error || 'Failed', 'error'); }
+      } catch (e) { showNotification('Error: ' + e.message, 'error'); }
+    }
+
+    // ── Reject Confirmation Modal ────────────────────────────────
+    function confirmRejectRequest(req) {
+      showModal('rejectRequestModal', `
+        <div class="flex items-start gap-3 mb-4">
+          <div class="w-10 h-10 rounded-xl bg-accent-red/10 flex items-center justify-center shrink-0">
+            <svg class="w-5 h-5 text-accent-red" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+          </div>
+          <div>
+            <h3 class="text-lg font-bold text-white">Reject Access Request</h3>
+            <p class="text-xs text-gray-500 mt-0.5">Deny <b class="text-white">${req.requester_name}</b> (<span class="mono">${req.requester_email}</span>) access. They will be notified by email.</p>
+          </div>
+        </div>
+        <div class="mb-4">
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">Reason (optional)</label>
+          <textarea id="rejectNotes" rows="3" class="w-full search-input rounded-lg px-3 py-2 text-sm text-white" placeholder="e.g. Access not required for this role"></textarea>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="closeModal('rejectRequestModal')" class="btn flex-1 bg-white/5 text-gray-300 py-2.5 rounded-lg hover:bg-white/10 text-sm border border-border-subtle">Cancel</button>
+          <button onclick="submitRejectRequest(${req.id})" class="btn flex-1 bg-accent-red text-white py-2.5 rounded-lg hover:bg-accent-red/90 text-sm font-medium">Confirm Rejection</button>
+        </div>
+      `);
+    }
+
+    async function submitRejectRequest(requestId) {
+      const notes = (document.getElementById('rejectNotes')?.value || '').trim();
+      try {
+        const res = await fetch(`/api/access-requests/${requestId}/respond`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'rejected', notes })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showNotification('Request rejected', 'success');
+          closeModal('rejectRequestModal');
           loadView('access-requests');
         } else { showNotification(data.error || 'Failed', 'error'); }
       } catch (e) { showNotification('Error: ' + e.message, 'error'); }

@@ -361,21 +361,63 @@ class DatabaseManager:
                     """)
                 return [dict(row) for row in cur.fetchall()]
 
-    def respond_to_access_request(self, request_id: int, status: str, responded_by: int, notes: str = "") -> bool:
-        """Approve or reject an access request."""
+    def respond_to_access_request(self, request_id: int, status: str, responded_by: int,
+                                  notes: str = "", approved_role: str = "developer") -> bool:
+        """Approve or reject an access request.
+
+        On 'approved', the requester is created as a user with `approved_role`
+        ('developer' or 'admin') if not already in the system, and — if the
+        request targeted a specific project — is automatically assigned to
+        that project with the corresponding role ('tl' for admin, 'developer'
+        otherwise).
+
+        Args:
+            approved_role: 'developer' or 'admin' (TL). Ignored if status != approved.
+        """
         try:
+            if approved_role not in ("developer", "admin"):
+                approved_role = "developer"
+            project_role = "tl" if approved_role == "admin" else "developer"
+
             with self.connect() as conn:
-                with conn.cursor() as cur:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT * FROM access_requests WHERE id = %s", (request_id,))
+                    req = cur.fetchone()
+                    if not req:
+                        return False
+
                     cur.execute("""
                         UPDATE access_requests
                         SET status = %s, responded_at = CURRENT_TIMESTAMP, responded_by = %s, notes = %s
                         WHERE id = %s
-                        RETURNING requester_email
                     """, (status, responded_by, notes, request_id))
-                    result = cur.fetchone()
+
+                    if status == "approved":
+                        # 1. Ensure user exists with the designated role (idempotent)
+                        cur.execute("""
+                            INSERT INTO users (email, name, role, created_by, is_active)
+                            VALUES (%s, %s, %s, %s, TRUE)
+                            ON CONFLICT (email) DO UPDATE
+                                SET is_active = TRUE,
+                                    role = EXCLUDED.role
+                            RETURNING id
+                        """, (req['requester_email'], req['requester_name'], approved_role, responded_by))
+
+                        # 2. If request targeted a specific project, assign
+                        if req.get('project_id'):
+                            cur.execute("""
+                                INSERT INTO project_assignments
+                                    (project_id, user_email, role_on_project, assigned_by)
+                                VALUES (%s, %s, %s, %s)
+                                ON CONFLICT (project_id, user_email) DO UPDATE
+                                    SET role_on_project = EXCLUDED.role_on_project,
+                                        assigned_at = CURRENT_TIMESTAMP
+                            """, (req['project_id'], req['requester_email'], project_role, responded_by))
+
                     conn.commit()
-                    return result is not None
-        except Exception:
+                    return True
+        except Exception as e:
+            print(f"[DB Error] respond_to_access_request: {e}")
             return False
 
     def log_analytics(self, user_email: str, project_id: int, date: date, **metrics) -> bool:

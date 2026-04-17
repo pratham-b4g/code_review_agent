@@ -837,10 +837,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     self._json_response({"error": "Invalid status. Must be 'approved' or 'rejected'"}, 400)
                     return
 
+                # Role to grant on approval. Only super_admin may elevate to 'admin' (TL).
+                approved_role = (data.get("approved_role") or "developer").lower()
+                if approved_role not in ("developer", "admin"):
+                    approved_role = "developer"
+                if approved_role == "admin" and _current_user.get("role") != "super_admin":
+                    self._json_response({"error": "Only super admin can approve as TL"}, 403)
+                    return
+
                 success = db.respond_to_access_request(
                     request_id,
                     req_status,
-                    responded_by
+                    responded_by,
+                    notes=data.get("notes", ""),
+                    approved_role=approved_role
                 )
 
                 # Send email notification to developer
