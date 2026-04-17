@@ -578,6 +578,87 @@ class AnalyticsTracker:
             "branches": per_branch,
         }
 
+    def _build_daily_activity(self, projects_scope: List[Dict[str, Any]],
+                              dev_emails, days: int) -> List[Dict[str, Any]]:
+        """Return `[{date, commits, lines}]` for the last `days` days.
+
+        Aggregated across all in-scope projects + developers. Safe when
+        there's no data — returns a zero-filled series so the chart still
+        renders a clean horizontal baseline instead of an empty panel.
+        """
+        from datetime import date, timedelta
+        today = date.today()
+        # Cap to ~3 months so the "All Time" filter doesn't spawn years of
+        # git subprocesses; the chart is a recent-trend indicator regardless.
+        window = max(1, min(int(days or 7), 90))
+
+        buckets: Dict[str, Dict[str, int]] = {}
+        for i in range(window):
+            d = (today - timedelta(days=window - 1 - i)).isoformat()
+            buckets[d] = {"commits": 0, "lines": 0}
+
+        emails = [e for e in (dev_emails or []) if e]
+        if not emails or not projects_scope:
+            return [{"date": d, "commits": v["commits"], "lines": v["lines"]}
+                    for d, v in buckets.items()]
+
+        since = f"{window}.days.ago"
+        for p in projects_scope:
+            p_path = self.ensure_local_clone(p.get('path'), project_id=p.get('id'))
+            if not p_path or not os.path.exists(p_path):
+                continue
+            for email in emails:
+                # Reuse the alias-fallback chain for robustness
+                candidates = [email]
+                lp = email.split('@', 1)[0]
+                if lp and lp != email:
+                    candidates.append(lp)
+                seen_shas_local = set()
+                for pat in candidates:
+                    try:
+                        result = subprocess.run(
+                            ["git", "-C", p_path, "log", "--all",
+                             f"--author={pat}", f"--since={since}",
+                             "--no-merges", "-i",
+                             "--pretty=format:%H|%ad", "--date=short",
+                             "--shortstat"],
+                            capture_output=True, text=True, timeout=60,
+                        )
+                    except Exception:
+                        continue
+                    if result.returncode != 0 or not result.stdout:
+                        continue
+                    lines = result.stdout.splitlines()
+                    i = 0
+                    while i < len(lines):
+                        ln = lines[i].strip()
+                        if "|" in ln and ln.count("|") >= 1:
+                            sha, d_str = ln.split("|", 1)
+                            if sha in seen_shas_local:
+                                # Skip possible shortstat
+                                if i + 1 < len(lines) and ("changed" in lines[i+1] or "insertion" in lines[i+1]):
+                                    i += 1
+                                i += 1; continue
+                            seen_shas_local.add(sha)
+                            bucket = buckets.get(d_str)
+                            if bucket is not None:
+                                bucket["commits"] += 1
+                                if i + 1 < len(lines):
+                                    stat = lines[i+1]
+                                    ins = re.search(r"(\d+) insertion", stat)
+                                    dele = re.search(r"(\d+) deletion", stat)
+                                    if ins or dele:
+                                        bucket["lines"] += (int(ins.group(1)) if ins else 0) + \
+                                                           (int(dele.group(1)) if dele else 0)
+                                        i += 1
+                        i += 1
+                    # Full-email hit is enough; skip looser patterns
+                    if pat == email and any(v["commits"] for v in buckets.values()):
+                        break
+
+        return [{"date": d, "commits": v["commits"], "lines": v["lines"]}
+                for d, v in buckets.items()]
+
     def backfill_user_history(self, project_id: int, project_path: str,
                               user_email: str, since_days: int = 365) -> Dict[str, Any]:
         """Walk git history for a user across ALL branches and populate
@@ -1056,9 +1137,27 @@ class AnalyticsTracker:
                 # Sort branches by recency
                 dev_branch_stats.sort(key=lambda b: (b.get('last_date') or ''), reverse=True)
                 branches_list = [b['name'] for b in dev_branch_stats]
-                dev_quality = round(sum(dev_quality_weighted) / len(dev_quality_weighted), 1) if dev_quality_weighted else 0
-                if dev_quality:
-                    quality_scores.append(dev_quality)
+
+                # ── Quality (per developer) ──
+                # Issue-density based, log-scaled so large projects don't
+                # crush to 0. A dev who touched N files with I attributed
+                # issues gets: 100 − 18·log10(1 + I/max(N,1)·8).
+                # Tuned so 0 issues → 100, 1 per file → ~86, 5/file → ~69,
+                # 20/file → ~52, 100/file → ~35.
+                import math as _m
+                if dev_files_touched > 0 and dev_attributed_issues_max >= 0:
+                    density = dev_attributed_issues_max / max(dev_files_touched, 1)
+                    dev_quality = round(max(10.0, 100 - 18 * _m.log10(1 + density * 8)), 1)
+                else:
+                    dev_quality = 0 if dev_total_commits == 0 else 100
+                quality_scores.append(dev_quality)
+
+                # ── Effort (per developer) ──
+                # Commits carry the strongest signal; lines provide a
+                # secondary cue. Log-damped to keep a handful of huge
+                # refactors from dominating the scale.
+                effort_raw = dev_total_commits * 6 + (dev_lines_added + dev_lines_removed) * 0.04
+                dev_effort = round(effort_raw, 0) if effort_raw > 0 else 0
 
                 developers.append({
                     'name': meta['name'],
@@ -1069,7 +1168,7 @@ class AnalyticsTracker:
                     'files_touched': dev_files_touched,
                     'issues': dev_attributed_issues_max,   # MAX across branches
                     'quality_score': dev_quality,
-                    'effort_score': 0,  # (legacy — kept for compat)
+                    'effort_score': dev_effort,
                     'current_branch': dev_current_branch,
                     'latest_commit_date': dev_latest_date,
                     'branches': branches_list,
@@ -1079,7 +1178,17 @@ class AnalyticsTracker:
                     'project_count': len(meta['projects']),
                 })
 
+            # Aggregate project-level averages from live dev values (not stored)
             avg_quality = round(sum(quality_scores) / len(quality_scores), 1) if quality_scores else 0
+            total_effort = int(sum(d.get('effort_score', 0) or 0 for d in developers))
+
+            # ── Daily activity timeseries (for charts) ──
+            # We build a per-day commits count for the window by walking git
+            # log across each project (cached clones). This powers the
+            # Activity Trend chart and Dashboard widgets.
+            daily_activity = self._build_daily_activity(
+                projects_scope, dev_emails.keys(), days
+            )
 
             return {
                 'total_commits': total_unique_commits,
@@ -1088,7 +1197,8 @@ class AnalyticsTracker:
                 'total_warnings': total_warnings,
                 'total_infos': total_infos,
                 'avg_quality': avg_quality,
-                'avg_effort': 0,
+                'avg_effort': total_effort,
+                'daily_activity': daily_activity,
                 'developers': developers,
                 'project_summary': project_issue_summary,    # per-project + current_branch + per-branch breakdown
                 'period': f"{start_date} to {end_date}",

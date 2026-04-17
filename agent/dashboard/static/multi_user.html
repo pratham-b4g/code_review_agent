@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CRA Dashboard - Multi User</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -745,6 +746,16 @@
         }
       } catch (e) { console.error('Dashboard stats error:', e); }
 
+      // Fire-and-forget analytics fetch for dashboard mini-charts
+      const _dashAnalyticsPromise = (async () => {
+        try {
+          const params = new URLSearchParams({ filter: '15d' });
+          if (currentRole === 'developer' && currentUser?.email) params.set('user_email', currentUser.email);
+          const r = await fetch(`/api/analytics?${params.toString()}`);
+          return await r.json();
+        } catch { return null; }
+      })();
+
       panel.innerHTML = `
         <div class="p-6 fade-in">
           <div class="mb-6">
@@ -752,6 +763,19 @@
             <p class="text-sm text-gray-500 mt-1">${roleLabels[currentRole] || currentRole} &middot; ${new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</p>
           </div>
           ${statsHTML}
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 mb-6">
+            <div class="card p-5 lg:col-span-2">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="text-sm font-semibold text-white">Last 14 days</h3>
+                <span class="text-[10px] text-gray-500">commits &middot; lines changed</span>
+              </div>
+              <div class="h-52"><canvas id="dashActivityChart"></canvas></div>
+            </div>
+            <div class="card p-5">
+              <h3 class="text-sm font-semibold text-white mb-3">Open Issue Mix</h3>
+              <div class="h-52"><canvas id="dashIssueMixChart"></canvas></div>
+            </div>
+          </div>
           <div class="card p-5">
             <h3 class="text-sm font-semibold text-white mb-3">Quick Actions</h3>
             <div class="flex flex-wrap gap-2">
@@ -771,6 +795,61 @@
           </div>
         </div>
       `;
+
+      // Populate mini-charts once analytics returns
+      _dashAnalyticsPromise.then(d => {
+        if (!d || typeof Chart === 'undefined') return;
+        const theme = _chartTheme();
+        const trend = document.getElementById('dashActivityChart');
+        if (trend && Array.isArray(d.daily_activity)) {
+          _destroyChart('dashActivityChart');
+          const labels = d.daily_activity.map(x => x.date.slice(5));
+          _charts.dashActivityChart = new Chart(trend, {
+            type: 'line',
+            data: {
+              labels,
+              datasets: [
+                { label: 'Commits', data: d.daily_activity.map(x => x.commits||0),
+                  borderColor: '#4f8ff7', backgroundColor: 'rgba(79,143,247,0.18)', fill: true,
+                  tension: 0.35, borderWidth: 2, pointRadius: 2 },
+                { label: 'Lines', data: d.daily_activity.map(x => x.lines||0),
+                  borderColor: '#a78bfa', backgroundColor: 'rgba(167,139,250,0.08)', fill: false,
+                  tension: 0.35, borderWidth: 2, pointRadius: 0, borderDash: [4,3], yAxisID: 'y1' },
+              ],
+            },
+            options: {
+              responsive: true, maintainAspectRatio: false,
+              interaction: { intersect: false, mode: 'index' },
+              plugins: { legend: { labels: { color: theme.text, boxWidth: 10, font: { size: 11 } } } },
+              scales: {
+                x: { grid: { color: theme.grid }, ticks: { color: theme.tick, font: { size: 10 } } },
+                y: { grid: { color: theme.grid }, ticks: { color: theme.tick, font: { size: 10 } }, beginAtZero: true },
+                y1: { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: theme.tick, font: { size: 10 } }, beginAtZero: true },
+              },
+            },
+          });
+        }
+        const mix = document.getElementById('dashIssueMixChart');
+        if (mix) {
+          _destroyChart('dashIssueMixChart');
+          const e = d.total_errors||0, w = d.total_warnings||0, i = d.total_infos||0;
+          const total = e + w + i;
+          _charts.dashIssueMixChart = new Chart(mix, {
+            type: 'doughnut',
+            data: {
+              labels: ['Errors', 'Warnings', 'Infos'],
+              datasets: [{ data: total ? [e,w,i] : [1], backgroundColor: ['#ef4444','#f59e0b','#22d3ee'], borderColor: '#0a0d14', borderWidth: 2 }],
+            },
+            options: {
+              responsive: true, maintainAspectRatio: false, cutout: '65%',
+              plugins: {
+                legend: { position: 'bottom', labels: { color: theme.text, boxWidth: 10, font: { size: 11 } } },
+                tooltip: { enabled: total > 0 },
+              },
+            },
+          });
+        }
+      });
     }
 
     // ── Projects View (Super Admin) ─────────────────────────────
@@ -1121,9 +1200,25 @@
               </table>
             </div>
           </div>
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 mb-3">
+            <div class="card p-5 lg:col-span-2">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="text-sm font-semibold text-white">Activity Trend</h3>
+                <span class="text-[10px] text-gray-500">commits &middot; lines changed</span>
+              </div>
+              <div class="h-60"><canvas id="activityTrendChart"></canvas></div>
+            </div>
+            <div class="card p-5">
+              <h3 class="text-sm font-semibold text-white mb-3">Issue Mix</h3>
+              <div class="h-60"><canvas id="issueMixChart"></canvas></div>
+            </div>
+          </div>
           <div class="card p-5">
-            <h3 class="text-sm font-semibold text-white mb-3">Activity Trend</h3>
-            <div id="activityChart" class="h-48 flex items-center justify-center text-gray-600 text-xs">Chart visualization coming soon</div>
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-sm font-semibold text-white">Developer Contributions</h3>
+              <span class="text-[10px] text-gray-500">commits vs attributed issues (top 10)</span>
+            </div>
+            <div class="h-72"><canvas id="devContribChart"></canvas></div>
           </div>
         </div>`;
       // Fast initial render from existing scans, then kick off smart background auto-scan
@@ -1272,7 +1367,110 @@
             }).join('');
           }
         }
+        // Render charts (safe to call even if canvases don't exist yet)
+        renderAnalyticsCharts(analyticsData);
       } catch (e) { console.error('Analytics error:', e); }
+    }
+
+    // ── Chart helpers ──────────────────────────────────────────
+    const _charts = {};
+    function _destroyChart(id) { if (_charts[id]) { try { _charts[id].destroy(); } catch {} delete _charts[id]; } }
+    function _chartTheme() {
+      return {
+        grid: 'rgba(148,163,184,0.08)',
+        tick: '#64748b',
+        text: '#e2e8f0',
+      };
+    }
+    function renderAnalyticsCharts(data) {
+      if (typeof Chart === 'undefined') return;
+      const theme = _chartTheme();
+      // ── Activity Trend (commits + lines, dual axis) ──
+      const trendCanvas = document.getElementById('activityTrendChart');
+      if (trendCanvas && Array.isArray(data.daily_activity)) {
+        _destroyChart('activityTrendChart');
+        const labels = data.daily_activity.map(d => d.date.slice(5));
+        const commits = data.daily_activity.map(d => d.commits || 0);
+        const lines = data.daily_activity.map(d => d.lines || 0);
+        _charts.activityTrendChart = new Chart(trendCanvas, {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [
+              { label: 'Commits', data: commits, borderColor: '#4f8ff7', backgroundColor: 'rgba(79,143,247,0.15)',
+                tension: 0.35, fill: true, yAxisID: 'y', pointRadius: 2, borderWidth: 2 },
+              { label: 'Lines changed', data: lines, borderColor: '#a78bfa', backgroundColor: 'rgba(167,139,250,0.1)',
+                tension: 0.35, fill: false, yAxisID: 'y1', pointRadius: 0, borderWidth: 2, borderDash: [4,3] },
+            ],
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            plugins: {
+              legend: { labels: { color: theme.text, boxWidth: 10, font: { size: 11 } } },
+              tooltip: { backgroundColor: '#0a0d14', borderColor: '#1e293b', borderWidth: 1 },
+            },
+            scales: {
+              x: { grid: { color: theme.grid }, ticks: { color: theme.tick, font: { size: 10 } } },
+              y: { position: 'left', grid: { color: theme.grid }, ticks: { color: theme.tick, font: { size: 10 } }, beginAtZero: true, title: { display: true, text: 'Commits', color: theme.tick, font: { size: 10 } } },
+              y1: { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: theme.tick, font: { size: 10 } }, beginAtZero: true, title: { display: true, text: 'Lines', color: theme.tick, font: { size: 10 } } },
+            },
+          },
+        });
+      }
+
+      // ── Issue Mix (donut) ──
+      const mixCanvas = document.getElementById('issueMixChart');
+      if (mixCanvas) {
+        _destroyChart('issueMixChart');
+        const e = data.total_errors || 0, w = data.total_warnings || 0, i = data.total_infos || 0;
+        const total = e + w + i;
+        _charts.issueMixChart = new Chart(mixCanvas, {
+          type: 'doughnut',
+          data: {
+            labels: ['Errors', 'Warnings', 'Infos'],
+            datasets: [{ data: total ? [e, w, i] : [1], backgroundColor: ['#ef4444', '#f59e0b', '#22d3ee'], borderColor: '#0a0d14', borderWidth: 2 }],
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false, cutout: '68%',
+            plugins: {
+              legend: { position: 'bottom', labels: { color: theme.text, boxWidth: 10, font: { size: 11 } } },
+              tooltip: { enabled: total > 0, backgroundColor: '#0a0d14', borderColor: '#1e293b', borderWidth: 1 },
+            },
+          },
+        });
+      }
+
+      // ── Developer Contributions (grouped bar) ──
+      const devCanvas = document.getElementById('devContribChart');
+      if (devCanvas && Array.isArray(data.developers)) {
+        _destroyChart('devContribChart');
+        const top = [...data.developers]
+          .sort((a,b) => (b.commits||0) - (a.commits||0))
+          .slice(0, 10);
+        _charts.devContribChart = new Chart(devCanvas, {
+          type: 'bar',
+          data: {
+            labels: top.map(d => (d.name || d.email || '').split(' ')[0] || d.email),
+            datasets: [
+              { label: 'Commits', data: top.map(d => d.commits||0), backgroundColor: 'rgba(79,143,247,0.75)', borderRadius: 4 },
+              { label: 'Issues', data: top.map(d => d.issues||0), backgroundColor: 'rgba(239,68,68,0.75)', borderRadius: 4 },
+              { label: 'Effort', data: top.map(d => d.effort_score||0), backgroundColor: 'rgba(52,211,153,0.7)', borderRadius: 4 },
+            ],
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+              legend: { labels: { color: theme.text, boxWidth: 10, font: { size: 11 } } },
+              tooltip: { backgroundColor: '#0a0d14', borderColor: '#1e293b', borderWidth: 1 },
+            },
+            scales: {
+              x: { grid: { color: theme.grid }, ticks: { color: theme.tick, font: { size: 10 } } },
+              y: { grid: { color: theme.grid }, ticks: { color: theme.tick, font: { size: 10 } }, beginAtZero: true },
+            },
+          },
+        });
+      }
     }
 
     // Show detailed drill-down for a developer
