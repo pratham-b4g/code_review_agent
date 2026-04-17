@@ -819,9 +819,14 @@ class AnalyticsTracker:
                 if not scans_filt:
                     continue
 
-                # Pick the "current" branch for dedupe reference
-                pref = ['main', 'master', 'develop', 'dev']
+                # Pick the "current" branch for dedupe reference.
+                # Priority: project.main_branch → common defaults → most recently scanned.
                 branch_map = {s['branch']: s for s in scans_filt}
+                configured = (p.get('main_branch') or '').strip()
+                pref = []
+                if configured:
+                    pref.append(configured)
+                pref += ['main', 'master', 'develop', 'dev']
                 current_br = next((b for b in pref if b in branch_map), None)
                 if not current_br:
                     latest = max(scans_filt, key=lambda s: str(s.get('scanned_at') or ''))

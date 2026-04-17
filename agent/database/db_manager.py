@@ -1,8 +1,11 @@
 """PostgreSQL database manager for CRA multi-user system."""
 import os
+import threading
+from contextlib import contextmanager
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
 import psycopg2
+from psycopg2 import pool as _pg_pool
 from psycopg2.extras import RealDictCursor
 
 # Single source of truth — shared Neon cloud Postgres + env overrides
@@ -13,19 +16,79 @@ from agent.config.auth_config import (
 )
 
 
+# ── Process-wide connection pool ────────────────────────────────────────
+# Opening a TLS connection to remote Postgres (e.g. Neon us-east-1) is
+# expensive (~300-600ms). We keep a small pool of long-lived connections
+# so HTTP handlers reuse them across requests instead of reconnecting.
+_POOL: Optional[_pg_pool.ThreadedConnectionPool] = None
+_POOL_LOCK = threading.Lock()
+_POOL_URL: Optional[str] = None
+
+
+def _get_pool(db_url: str) -> _pg_pool.ThreadedConnectionPool:
+    global _POOL, _POOL_URL
+    with _POOL_LOCK:
+        if _POOL is None or _POOL_URL != db_url:
+            if _POOL is not None:
+                try:
+                    _POOL.closeall()
+                except Exception:
+                    pass
+            minconn = int(os.getenv("CRA_DB_POOL_MIN", "1"))
+            maxconn = int(os.getenv("CRA_DB_POOL_MAX", "8"))
+            # keepalives keep idle TCP sockets alive through NAT/timeouts,
+            # so Neon's autosuspend-resume cycle doesn't kill our pool.
+            _POOL = _pg_pool.ThreadedConnectionPool(
+                minconn, maxconn, db_url,
+                keepalives=1, keepalives_idle=30,
+                keepalives_interval=10, keepalives_count=3,
+                connect_timeout=10,
+            )
+            _POOL_URL = db_url
+    return _POOL
+
+
 class DatabaseManager:
-    """Manages PostgreSQL connection and all database operations."""
+    """Thin wrapper around a process-wide pooled Postgres connection.
+
+    Usage (unchanged from previous API):
+        with db.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(...)
+
+    The outer `with` now transparently acquires a connection from the pool,
+    commits (or rolls back on exception), and returns it to the pool.
+    """
 
     def __init__(self, db_url: Optional[str] = None):
         # Priority: explicit arg > CRA_DATABASE_URL env > auth_config default (Neon)
         self.db_url = db_url or os.getenv("CRA_DATABASE_URL") or DEFAULT_DB_URL
-        self.conn = None
 
+    @contextmanager
     def connect(self):
-        """Establish database connection."""
-        if not self.conn or self.conn.closed:
-            self.conn = psycopg2.connect(self.db_url)
-        return self.conn
+        pool_ = _get_pool(self.db_url)
+        conn = pool_.getconn()
+        broken = False
+        try:
+            yield conn
+            if not conn.closed:
+                conn.commit()
+        except psycopg2.OperationalError:
+            # Socket dropped / server recycled — discard this conn entirely.
+            broken = True
+            raise
+        except Exception:
+            try:
+                if conn and not conn.closed:
+                    conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                pool_.putconn(conn, close=broken)
+            except Exception:
+                pass
 
     def init_schema(self):
         """Create all required tables."""
@@ -280,6 +343,23 @@ class DatabaseManager:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT * FROM projects WHERE is_active = TRUE ORDER BY created_at DESC")
                 return [dict(row) for row in cur.fetchall()]
+
+    def update_project_main_branch(self, project_id: int, main_branch: str) -> bool:
+        """Update the configured main/default branch for a project."""
+        if not main_branch:
+            return False
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE projects SET main_branch = %s WHERE id = %s",
+                        (main_branch, project_id),
+                    )
+                    conn.commit()
+                    return cur.rowcount > 0
+        except Exception as e:
+            print(f"[DB Error] update_project_main_branch: {e}")
+            return False
 
     def get_user_projects(self, user_email: str) -> List[Dict[str, Any]]:
         """Get projects assigned to a user."""

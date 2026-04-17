@@ -10,7 +10,7 @@ import sys
 import threading
 import webbrowser
 from functools import partial
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import HTTPServer, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
@@ -51,16 +51,127 @@ def _serialize_violations(violations: list) -> List[Dict[str, Any]]:
     return out
 
 
+# ── Singleton DatabaseManager ────────────────────────────────────────────
+# Reusing one DatabaseManager across requests lets the underlying process-
+# wide connection pool actually cache TLS sockets to Postgres. Previously
+# each handler instantiated a fresh manager, which effectively bypassed
+# the pool's benefits when combined with psycopg2's per-instance state.
+_DB_SINGLETON = None
+_DB_LOCK = threading.Lock()
+
+
 def _get_db():
-    """Get database manager instance."""
-    from agent.database import DatabaseManager
-    return DatabaseManager()
+    """Return the process-wide DatabaseManager (lazy, thread-safe)."""
+    global _DB_SINGLETON
+    if _DB_SINGLETON is None:
+        with _DB_LOCK:
+            if _DB_SINGLETON is None:
+                from agent.database import DatabaseManager
+                _DB_SINGLETON = DatabaseManager()
+    return _DB_SINGLETON
+
+
+# ── Tiny in-memory response cache ────────────────────────────────────────
+# Same tab/click often re-hits the same read endpoint (projects, users,
+# assignments). We cache by (path + query + user) with a very short TTL
+# so mutations are visible within ~3s while navigation feels instant.
+_CACHE: Dict[str, tuple] = {}
+_CACHE_LOCK = threading.Lock()
+_CACHE_DEFAULT_TTL = float(os.getenv("CRA_RESPONSE_CACHE_TTL", "3.0"))
+
+
+def _cache_get(key: str):
+    import time
+    with _CACHE_LOCK:
+        entry = _CACHE.get(key)
+        if not entry:
+            return None
+        value, expires_at = entry
+        if time.monotonic() > expires_at:
+            _CACHE.pop(key, None)
+            return None
+        return value
+
+
+def _cache_set(key: str, value: Any, ttl: float = None):
+    import time
+    ttl = ttl if ttl is not None else _CACHE_DEFAULT_TTL
+    with _CACHE_LOCK:
+        _CACHE[key] = (value, time.monotonic() + ttl)
+
+
+def _cache_invalidate(prefix: str = ""):
+    """Drop all cache entries whose key starts with `prefix` (or all if empty)."""
+    with _CACHE_LOCK:
+        if not prefix:
+            _CACHE.clear()
+            return
+        for k in list(_CACHE.keys()):
+            if k.startswith(prefix):
+                _CACHE.pop(k, None)
 
 
 def _get_email_notifier():
     """Get email notifier instance."""
     from agent.utils.email_notifier import get_notifier
     return get_notifier()
+
+
+def _detect_default_branch(project_path: str) -> Optional[str]:
+    """Best-effort default-branch detection.
+
+    Works for both local repos and remote URLs. Order of attempts:
+      1. `git symbolic-ref refs/remotes/origin/HEAD` (local clone)
+      2. `git ls-remote --symref <url> HEAD` (remote URL)
+      3. Probe common names: develop, main, master, dev
+
+    Returns None if nothing can be resolved.
+    """
+    import subprocess
+    if not project_path:
+        return None
+    try:
+        # Local clone with origin/HEAD symref
+        if os.path.exists(project_path) and os.path.isdir(os.path.join(project_path, ".git")):
+            r = subprocess.run(
+                ["git", "-C", project_path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                ref = r.stdout.strip()
+                if ref.startswith("origin/"):
+                    return ref.split("/", 1)[1]
+            # Probe existing branches
+            r2 = subprocess.run(
+                ["git", "-C", project_path, "branch", "-r"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r2.returncode == 0:
+                remote_branches = {
+                    ln.strip().replace("origin/", "", 1)
+                    for ln in r2.stdout.splitlines() if ln.strip() and "->" not in ln
+                }
+                for cand in ("develop", "main", "master", "dev"):
+                    if cand in remote_branches:
+                        return cand
+                # Fall back to first remote branch if any
+                return next(iter(sorted(remote_branches)), None)
+        # Remote URL
+        if project_path.startswith(("http://", "https://", "git@", "ssh://")):
+            r = subprocess.run(
+                ["git", "ls-remote", "--symref", project_path, "HEAD"],
+                capture_output=True, text=True, timeout=20,
+            )
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    # e.g. "ref: refs/heads/develop\tHEAD"
+                    if line.startswith("ref:"):
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[1].startswith("refs/heads/"):
+                            return parts[1].replace("refs/heads/", "", 1)
+    except Exception as e:
+        print(f"[DefaultBranch] detection error: {e}")
+    return None
 
 
 def _run_scan(project_dir: str, language: Optional[str] = None,
@@ -357,10 +468,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         # Get all TLs (for access request dropdown - allowed unauthenticated for request access flow)
         if path == "/api/users/tls":
             try:
+                cache_key = "GET:/api/users/tls"
+                cached = _cache_get(cache_key)
+                if cached is not None:
+                    self._json_response(cached); return
                 db = _get_db()
                 tls = db.get_all_users(role='admin')
+                payload = [{"email": u["email"], "name": u["name"]} for u in tls]
+                _cache_set(cache_key, payload, ttl=10.0)
                 # Only expose minimal info (name + email) for the dropdown
-                self._json_response([{"email": u["email"], "name": u["name"]} for u in tls])
+                self._json_response(payload)
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
             return
@@ -370,6 +487,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             if not _current_user:
                 self._json_response({"error": "Unauthorized"}, 401)
                 return
+            cache_key = f"GET:/api/users:{_current_user.get('email')}"
+            cached = _cache_get(cache_key)
+            if cached is not None:
+                self._json_response(cached); return
             if _current_user.get("role") not in ("super_admin", "admin"):
                 self._json_response({"error": "Forbidden: admin access required"}, 403)
                 return
@@ -387,8 +508,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": "Unauthorized"}, 401)
                 return
             try:
+                cache_key = "GET:/api/projects"
+                cached = _cache_get(cache_key)
+                if cached is not None:
+                    self._json_response(cached); return
                 db = _get_db()
                 projects = db.get_all_projects()
+                _cache_set(cache_key, projects)
                 self._json_response(projects)
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
@@ -400,8 +526,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": "Not authenticated"}, 401)
                 return
             try:
+                cache_key = f"GET:/api/my-projects:{_current_user.get('email')}"
+                cached = _cache_get(cache_key)
+                if cached is not None:
+                    self._json_response(cached); return
                 db = _get_db()
                 projects = db.get_user_projects(_current_user["email"])
+                _cache_set(cache_key, projects)
                 self._json_response(projects)
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
@@ -417,8 +548,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return
             try:
                 project_id = int(path.split("/")[3])
+                cache_key = f"GET:/api/projects/{project_id}/assignments"
+                cached = _cache_get(cache_key)
+                if cached is not None:
+                    self._json_response(cached); return
                 db = _get_db()
                 assignments = db.get_project_assignments(project_id)
+                _cache_set(cache_key, assignments)
                 self._json_response(assignments)
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
@@ -454,6 +590,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return
             try:
                 project_id = int(path.split("/")[3])
+                qs = parse_qs(parsed.query)
+                # Cache by (project, viewer, optional user_email scope) — git ls-remote is expensive
+                _cache_suffix = qs.get("user_email", [""])[0] or _current_user.get("email", "")
+                cache_key = f"GET:/api/projects/{project_id}/branches:{_current_user.get('role')}:{_cache_suffix}"
+                cached = _cache_get(cache_key)
+                if cached is not None:
+                    self._json_response(cached); return
                 db = _get_db()
                 
                 # Get project details
@@ -524,10 +667,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                                             branches.append(branch)
                 except Exception as e:
                     print(f"[Branches] Error fetching branches: {e}")
-                    branches = ['main', 'develop']  # Fallback
+                    branches = []
                 
                 if not branches:
-                    branches = ['main', 'develop']  # Default fallback
+                    # Fall back to the project's configured main_branch, or auto-detected default
+                    configured = (project.get('main_branch') or '').strip()
+                    detected = _detect_default_branch(project_path) if not configured else None
+                    default = configured or detected or 'main'
+                    branches = [default]
                 
                 # Remove duplicates and sort
                 branches = sorted(list(set(branches)))
@@ -568,15 +715,19 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     branches = [b for b in all_branches_for_dev if b in developer_branches]
                     if not branches:
                         # No authored commits yet — let dev work on any branch rather than
-                        # locking them to main alone.
-                        branches = all_branches_for_dev or ['main']
+                        # locking them to the project's main branch alone.
+                        configured = (project.get('main_branch') or '').strip()
+                        branches = all_branches_for_dev or ([configured] if configured else ['main'])
                 
                 # TL and super_admin see all branches
-                self._json_response({
+                response = {
                     "branches": branches,
                     "role": user_role,
                     "filtered": user_role == 'developer'
-                })
+                }
+                # Cache for longer than default — branch lists change rarely.
+                _cache_set(cache_key, response, ttl=30.0)
+                self._json_response(response)
                 
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
@@ -609,14 +760,44 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
                 project_path = project["path"]
 
-                # Check if branch parameter is specified
+                # Check if branch parameter is specified; otherwise use the
+                # project's configured `main_branch` (dynamic per-project).
+                # If unset/stale (doesn't exist in repo), auto-detect & persist.
                 qs = parse_qs(parsed.query)
                 branch = qs.get("branch", [None])[0]
+                if not branch:
+                    configured = (project.get("main_branch") or "").strip()
+                    detected = _detect_default_branch(project_path)
+                    if configured and detected and configured != detected:
+                        # Verify the configured branch actually exists
+                        import subprocess as _sp
+                        exists = False
+                        try:
+                            if os.path.exists(project_path) and os.path.isdir(os.path.join(project_path, ".git")):
+                                r = _sp.run(["git", "-C", project_path, "rev-parse", "--verify",
+                                             f"origin/{configured}"], capture_output=True, timeout=5)
+                                exists = r.returncode == 0
+                            elif project_path.startswith(("http://", "https://", "git@", "ssh://")):
+                                r = _sp.run(["git", "ls-remote", "--heads", project_path, configured],
+                                            capture_output=True, text=True, timeout=15)
+                                exists = r.returncode == 0 and bool(r.stdout.strip())
+                        except Exception:
+                            exists = True  # give benefit of the doubt
+                        if not exists:
+                            print(f"[Project] Configured main_branch '{configured}' not found; "
+                                  f"auto-correcting to '{detected}' for project {project_id}")
+                            db.update_project_main_branch(project_id, detected)
+                            configured = detected
+                    branch = configured or detected
 
                 if branch:
                     result = self._scan_project_branch(project_path, project_id, _current_user["email"], branch)
                 else:
                     result = self._scan_project(project_path, project_id, _current_user["email"])
+                # Surface the resolved default branch so the frontend
+                # can seed the branch dropdown without hardcoding "main".
+                if isinstance(result, dict) and result.get("success"):
+                    result.setdefault("default_branch", branch or (project.get("main_branch") or ""))
 
                 self._json_response(result)
 
@@ -731,6 +912,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         global _current_user
         parsed = urlparse(self.path)
         path = parsed.path
+
+        # Any write drops the TTL cache — next GET fetches fresh data.
+        _cache_invalidate()
 
         # Read request body
         content_length = int(self.headers.get('Content-Length', 0))
@@ -958,10 +1142,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     if existing_norm == norm_path:
                         pre_existing = p
                         break
+                # Auto-detect main_branch if not supplied (dynamic per-repo)
+                requested_branch = (data.get("main_branch") or "").strip()
+                if not requested_branch:
+                    requested_branch = _detect_default_branch(data.get("path")) or "main"
                 project_id = db.create_project(
                     data.get("name"),
                     data.get("path"),
-                    data.get("main_branch", "main"),
+                    requested_branch,
                     _current_user.get("id")
                 )
                 self._json_response({
@@ -970,6 +1158,33 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     "already_existed": pre_existing is not None,
                     "existing_project": pre_existing
                 })
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Update a project's default/main branch (super_admin or TL only)
+        if path.startswith("/api/projects/") and path.endswith("/main-branch"):
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            try:
+                project_id = int(path.split("/")[3])
+                new_branch = (data.get("main_branch") or "").strip()
+                if not new_branch:
+                    self._json_response({"error": "main_branch required"}, 400)
+                    return
+                db = _get_db()
+                role = _current_user.get("role")
+                if role not in ("super_admin", "admin"):
+                    self._json_response({"error": "Forbidden"}, 403)
+                    return
+                if role == "admin":
+                    assigned = [p['id'] for p in db.get_user_projects(_current_user["email"])]
+                    if project_id not in assigned:
+                        self._json_response({"error": "Not assigned to this project"}, 403)
+                        return
+                ok = db.update_project_main_branch(project_id, new_branch)
+                self._json_response({"success": ok, "main_branch": new_branch})
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
             return
@@ -1212,6 +1427,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         """Handle DELETE requests."""
         parsed = urlparse(self.path)
         path = parsed.path
+
+        _cache_invalidate()
 
         # Remove user from project assignment (super admin or TL only)
         if path.startswith("/api/project-assignments/"):
@@ -1712,8 +1929,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         ['git', '-C', temp_dir, 'checkout', '-b', branch, f'origin/{branch}'],
                         capture_output=True, text=True, timeout=30
                     )
-                    if checkout_result.returncode != 0 and branch != 'main':
-                        # Branch doesn't exist, return error or fall back to main
+                    if checkout_result.returncode != 0:
                         return {"success": False, "error": f"Branch '{branch}' not found in repository"}
                         
             elif os.path.exists(project_path):
@@ -1722,7 +1938,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     ['git', '-C', project_path, 'checkout', branch],
                     capture_output=True, text=True, timeout=30
                 )
-                if result.returncode != 0 and branch != 'main':
+                if result.returncode != 0:
                     return {"success": False, "error": f"Branch '{branch}' not found in local repository"}
                 scan_path = project_path
             else:
@@ -1881,7 +2097,13 @@ def run_dashboard(project_dir: Optional[str] = None, port: int = 9090,
     # Kill any existing dashboard process on the target port
     _kill_port(port)
 
-    server = HTTPServer(("127.0.0.1", port), DashboardHandler)
+    # ThreadingHTTPServer lets the browser's parallel fetches (tab click =>
+    # 3-5 simultaneous API requests) run concurrently instead of serializing.
+    # DB access is safe because we use a process-wide threadsafe connection
+    # pool, and the tiny TTL response cache guards its own dict with a lock.
+    server = ThreadingHTTPServer(("127.0.0.1", port), DashboardHandler)
+    # Reuse worker threads; don't let stragglers keep the process alive on exit.
+    server.daemon_threads = True
 
     print(f"\n  Starting dashboard on http://localhost:{port}")
     print(f"  Press Ctrl+C to stop.\n")

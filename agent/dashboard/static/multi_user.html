@@ -1641,18 +1641,19 @@
           });
         }
 
-        // Fallback: probe assignments on accessible projects
+        // Fallback: probe assignments on accessible projects (in parallel).
         if (!devProjects.length) {
-          const projectsUrl = currentRole === 'super_admin'
-            ? `/api/projects?t=${Date.now()}`
-            : `/api/my-projects?t=${Date.now()}`;
-          const myProjects = await (await fetch(projectsUrl)).json();
-          for (const project of myProjects) {
-            const assignments = await (await fetch(`/api/projects/${project.id}/assignments?t=${Date.now()}`)).json();
-            if (assignments.some(a => a.email === email)) {
-              devProjects.push({ id: project.id, name: project.name, path: project.path });
-            }
-          }
+          const projectsUrl = currentRole === 'super_admin' ? '/api/projects' : '/api/my-projects';
+          const myProjects = await (await fetch(`${projectsUrl}?t=${Date.now()}`)).json();
+          const probed = await Promise.all(
+            (myProjects || []).map(async project => {
+              try {
+                const a = await (await fetch(`/api/projects/${project.id}/assignments?t=${Date.now()}`)).json();
+                return (a || []).some(x => x.email === email) ? project : null;
+              } catch { return null; }
+            })
+          );
+          devProjects = probed.filter(Boolean).map(p => ({ id: p.id, name: p.name, path: p.path }));
         }
 
         if (!devProjects.length) { showNotification(`${name} is not assigned to any accessible project`, 'error'); return; }
@@ -1726,15 +1727,71 @@
 
     async function openProjectReview(projectId, path, viewAsEmail) {
       reviewViewAsEmail = viewAsEmail || null;
+      reviewDefaultBranch = null;
       const panel = document.getElementById('contentPanel');
       panel.innerHTML = `<div class="flex flex-col items-center justify-center h-full"><div class="w-10 h-10 border-3 border-accent-blue border-t-transparent rounded-full animate-spin mb-3"></div><p class="text-sm text-gray-400">Scanning project...</p><p class="text-xs text-gray-600 mt-1">This may take a moment for remote repos</p></div>`;
       try {
         const res = await fetch(`/api/scan-project/${projectId}?t=${Date.now()}`);
         const result = await res.json();
         if (!result.success) { panel.innerHTML = `<div class="p-6 text-red-400">Scan failed: ${result.error}</div>`; return; }
+        // Server-resolved default branch (configured main_branch OR auto-detected)
+        reviewDefaultBranch = result.default_branch || result.branch || null;
         renderProjectReview(panel, result, projectId, path);
-        fetchProjectBranches(projectId);
+        fetchProjectBranches(projectId, reviewDefaultBranch);
       } catch (e) { panel.innerHTML = `<div class="p-6 text-red-400">Error: ${e.message}</div>`; }
+    }
+
+    // Remember the project's resolved default branch (dynamic; configured or auto-detected)
+    let reviewDefaultBranch = null;
+
+    // Prompt the TL/super-admin to update a project's default branch, then rescan.
+    async function promptSetDefaultBranch(projectId) {
+      // Offer available branches as a datalist for convenience
+      let branchOptions = [];
+      try {
+        const res = await fetch(`/api/projects/${projectId}/branches?t=${Date.now()}`);
+        branchOptions = (await res.json()).branches || [];
+      } catch (e) { /* non-fatal */ }
+      const current = reviewDefaultBranch || '';
+      showModal('setDefaultBranchModal', `
+        <h3 class="text-lg font-bold text-white mb-1">Set Default Branch</h3>
+        <p class="text-xs text-gray-500 mb-4">This branch is used as the <b>baseline</b> for deduplicated issue counts in analytics.</p>
+        <label class="block text-xs text-gray-400 mb-1.5">Branch name</label>
+        <input id="defaultBranchInput" list="defaultBranchList" value="${current}" placeholder="e.g. develop, main, master"
+               class="w-full search-input rounded-lg px-3 py-2 text-sm text-white mb-4" />
+        <datalist id="defaultBranchList">
+          ${branchOptions.map(b => `<option value="${b}">`).join('')}
+        </datalist>
+        <div class="flex justify-end gap-2">
+          <button onclick="closeModal('setDefaultBranchModal')" class="btn px-4 py-2 bg-white/5 text-gray-300 text-sm rounded-lg hover:bg-white/10 border border-border-subtle">Cancel</button>
+          <button onclick="submitSetDefaultBranch(${projectId})" class="btn px-4 py-2 gradient-blue text-white text-sm rounded-lg">Save &amp; Rescan</button>
+        </div>
+      `);
+    }
+
+    async function submitSetDefaultBranch(projectId) {
+      const el = document.getElementById('defaultBranchInput');
+      const v = (el && el.value || '').trim();
+      if (!v) { showNotification('Enter a branch name', 'warning'); return; }
+      try {
+        const res = await fetch(`/api/projects/${projectId}/main-branch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ main_branch: v })
+        });
+        const d = await res.json();
+        if (d.success) {
+          closeModal('setDefaultBranchModal');
+          showNotification(`Default branch set to "${v}"`, 'success');
+          reviewDefaultBranch = v;
+          // Re-scan on the new default
+          const currentProject = currentReviewData?.project_id || projectId;
+          const path = currentReviewData?.path || '';
+          openProjectReview(currentProject, path, reviewViewAsEmail);
+        } else {
+          showNotification(d.error || 'Failed to update', 'error');
+        }
+      } catch (e) { showNotification('Error: ' + e.message, 'error'); }
     }
 
     async function fetchProjectBranches(projectId, selectedBranch) {
@@ -1745,9 +1802,15 @@
         const data = await res.json();
         const select = document.getElementById('reviewBranch');
         if (!select) return;
-        const branches = data.branches || ['main'];
-        const activeBranch = selectedBranch || branches[0] || 'main';
-        select.innerHTML = branches.map(b => `<option value="${b}" ${b===activeBranch?'selected':''}>${b}</option>`).join('');
+        const branches = data.branches || [];
+        // Prefer explicit selection → project default → first available
+        const fallback = reviewDefaultBranch && branches.includes(reviewDefaultBranch)
+          ? reviewDefaultBranch
+          : (branches[0] || '');
+        const activeBranch = selectedBranch || fallback;
+        select.innerHTML = branches.length
+          ? branches.map(b => `<option value="${b}" ${b===activeBranch?'selected':''}>${b}</option>`).join('')
+          : '<option disabled selected>No branches</option>';
         // Banner in header when viewing another user
         const header = document.getElementById('viewAsBanner');
         if (header) {
@@ -1757,7 +1820,10 @@
         }
       } catch (e) {
         const select = document.getElementById('reviewBranch');
-        if (select) select.innerHTML = '<option value="main" selected>main</option>';
+        if (select) {
+          const fb = reviewDefaultBranch || 'main';
+          select.innerHTML = `<option value="${fb}" selected>${fb}</option>`;
+        }
       }
     }
 
@@ -1789,6 +1855,7 @@
               <select id="reviewBranch" onchange="switchReviewBranch(this.value,${projectId},'${path.replace(/'/g,"\\'")}')" class="search-input rounded-lg px-2.5 py-1.5 text-xs text-white min-w-[120px]">
                 <option disabled selected>Loading...</option>
               </select>
+              ${(currentRole==='admin'||currentRole==='super_admin') ? `<button onclick="promptSetDefaultBranch(${projectId})" title="Set the project's default branch (e.g. develop)" class="btn px-2 py-1.5 bg-white/5 text-gray-300 border border-border-subtle text-xs rounded-lg hover:bg-white/10"><svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg></button>` : ''}
               ${(currentRole==='admin'||currentRole==='super_admin') ? `<button onclick="backfillProjectHistory(${projectId})" class="btn px-3 py-1.5 bg-accent-purple/10 text-accent-purple border border-accent-purple/20 text-xs rounded-lg hover:bg-accent-purple/20" title="Import git history for all assigned developers (branches + commits)">Backfill History</button>` : ''}
               <button onclick="openProjectReview(${projectId},'${path.replace(/'/g,"\\'")}')" class="btn px-3 py-1.5 gradient-blue text-white text-xs rounded-lg hover:opacity-90">Rescan</button>
             </div>
@@ -2108,8 +2175,8 @@
           <input type="text" id="newProjectPath" class="w-full search-input rounded-lg px-4 py-2.5 text-sm text-white" placeholder="/path/to/project or https://github.com/..." />
         </div>
         <div class="mb-3">
-          <label class="block text-xs font-medium text-gray-400 mb-1.5">Main Branch</label>
-          <input type="text" id="newProjectBranch" class="w-full search-input rounded-lg px-4 py-2.5 text-sm text-white" placeholder="main" value="main" />
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">Main Branch <span class="text-gray-600">(leave blank to auto-detect)</span></label>
+          <input type="text" id="newProjectBranch" class="w-full search-input rounded-lg px-4 py-2.5 text-sm text-white" placeholder="e.g. develop, main, master" value="" />
         </div>
         <div class="mb-3">
           <label class="block text-xs font-medium text-gray-400 mb-1.5">Assign TLs (${tls.length})</label>
@@ -2138,7 +2205,7 @@
       const selectedDevs = Array.from(document.querySelectorAll('input[name="newProjectDev"]:checked')).map(cb=>cb.value);
       if(!name||!path) { showNotification('Fill required fields','warning'); return; }
       try {
-        const res = await fetch('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,path,main_branch:mainBranch||'main'})});
+        const res = await fetch('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,path,main_branch:(mainBranch||'').trim()})});
         const data = await res.json();
         if(data.success && data.project_id) {
           // If TL is creating the project, auto-assign them as TL on it
