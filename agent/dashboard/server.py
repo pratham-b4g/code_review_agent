@@ -592,11 +592,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     self._json_response({"error": "Project not found"}, 404)
                     return
 
-                # Check if user is assigned to this project
-                user_projects = db.get_user_projects(_current_user["email"])
-                if not any(up["id"] == project_id for up in user_projects):
-                    self._json_response({"error": "Not assigned to this project"}, 403)
-                    return
+                # Super admin has unrestricted access to any project.
+                # TLs and developers must be assigned to scan.
+                if _current_user.get("role") != "super_admin":
+                    user_projects = db.get_user_projects(_current_user["email"])
+                    if not any(up["id"] == project_id for up in user_projects):
+                        self._json_response({"error": "Not assigned to this project"}, 403)
+                        return
 
                 project_path = project["path"]
 
