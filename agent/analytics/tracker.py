@@ -242,7 +242,14 @@ class AnalyticsTracker:
 
     def get_commits_for_user_on_branch(self, project_path: str, branch: str,
                                         user_email: str, since_days: int = 365) -> List[Dict[str, Any]]:
-        """Get all commits by a user on a specific branch, grouped per-commit with stats."""
+        """Get all commits by a user on a specific branch, grouped per-commit with stats.
+
+        Author-match strategy: try the full email first, then the email's
+        local-part (e.g. `devendra` from `devendra@b1zgroup.com`), and
+        finally fetch the name aliases stored in our DB (if any). This
+        handles devs whose git config uses a different email than their
+        dashboard login (a very common real-world mismatch).
+        """
         if not project_path or not os.path.exists(project_path):
             return []
         try:
@@ -262,21 +269,57 @@ class AnalyticsTracker:
                 if check.returncode != 0:
                     return []
 
-            cmd = [
-                "git", "-C", project_path, "log", ref,
-                f"--author={user_email}",
-                f"--since={since}",
-                "--no-merges",
-                "--pretty=format:%H|%an|%ae|%ad",
-                "--date=short",
-                "--shortstat",
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if result.returncode != 0:
-                return []
+            # Build candidate author patterns (git --author is a regex OR'd
+            # against name+email substrings — use --perl-regexp for safety).
+            candidates: List[str] = []
+            if user_email:
+                candidates.append(user_email)
+                local_part = user_email.split('@', 1)[0]
+                if local_part and local_part != user_email:
+                    candidates.append(local_part)
+            # Try aliases from DB (user's display name, etc.)
+            try:
+                u = self.db.get_user_by_email(user_email) if hasattr(self.db, 'get_user_by_email') else None
+                if u and u.get('name'):
+                    candidates.append(u['name'])
+            except Exception:
+                pass
 
-            commits = []
-            lines = result.stdout.splitlines()
+            commits: List[Dict[str, Any]] = []
+            seen_shas = set()
+            # Run git log once per candidate; short-circuit after the first
+            # productive pattern but always merge unique results so multiple
+            # aliases combine (e.g. dev used personal email for some commits).
+            for pattern in candidates:
+                cmd = [
+                    "git", "-C", project_path, "log", ref,
+                    f"--author={pattern}",
+                    f"--since={since}",
+                    "--no-merges",
+                    "--pretty=format:%H|%an|%ae|%ad",
+                    "--date=short",
+                    "--shortstat",
+                    "-i",  # case-insensitive author match
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                if result.returncode != 0:
+                    continue
+                self._merge_git_log_output(result.stdout, commits, seen_shas)
+                # If the full email already produced results, don't dilute
+                # with a looser pattern — stops "devendra" matching someone
+                # else named Devendra.
+                if commits and pattern == user_email:
+                    return commits
+            return commits
+        except Exception as e:
+            print(f"[Analytics] get_commits_for_user_on_branch error on {branch}: {e}")
+            return []
+
+    def _merge_git_log_output(self, stdout: str, commits: List[Dict[str, Any]],
+                               seen_shas: set) -> None:
+        """Parse `git log --shortstat` output and append unique commits."""
+        try:
+            lines = stdout.splitlines()
             i = 0
             while i < len(lines):
                 line = lines[i].strip()
@@ -285,8 +328,18 @@ class AnalyticsTracker:
                     continue
                 if "|" in line and line.count("|") >= 3:
                     parts = line.split("|")
+                    sha = parts[0]
+                    if sha in seen_shas:
+                        # Skip body + possible shortstat so we don't mis-align
+                        if i + 1 < len(lines) and ("changed" in lines[i + 1] or
+                                                   "insertion" in lines[i + 1] or
+                                                   "deletion" in lines[i + 1]):
+                            i += 1
+                        i += 1
+                        continue
+                    seen_shas.add(sha)
                     entry = {
-                        "hash": parts[0],
+                        "hash": sha,
                         "author_name": parts[1],
                         "author_email": parts[2],
                         "date": parts[3],
@@ -310,10 +363,8 @@ class AnalyticsTracker:
                             i += 1  # consume stat line
                     commits.append(entry)
                 i += 1
-            return commits
         except Exception as e:
-            print(f"[Analytics] get_commits_for_user_on_branch error on {branch}: {e}")
-            return []
+            print(f"[Analytics] _merge_git_log_output parse error: {e}")
 
     # ──────────────────────────────────────────────────────────────
     # Git-derived developer activity (authoritative source of truth)
@@ -386,28 +437,46 @@ class AnalyticsTracker:
             return set()
         try:
             since = f"{since_days}.days.ago"
-            cmd = ["git", "-C", project_path, "log",
-                   f"--author={user_email}", f"--since={since}",
-                   "--no-merges", "--name-only", "--pretty=format:"]
+            # Same alias fallback chain as get_commits_for_user_on_branch
+            candidates: List[str] = []
+            if user_email:
+                candidates.append(user_email)
+                lp = user_email.split('@', 1)[0]
+                if lp and lp != user_email:
+                    candidates.append(lp)
+            try:
+                u = self.db.get_user_by_email(user_email) if hasattr(self.db, 'get_user_by_email') else None
+                if u and u.get('name'):
+                    candidates.append(u['name'])
+            except Exception:
+                pass
+
+            ref = None
             if branch:
-                # Prefer remote ref if present
                 ref_check = subprocess.run(
                     ["git", "-C", project_path, "rev-parse", "--verify", f"origin/{branch}"],
                     capture_output=True, text=True, timeout=5
                 )
                 ref = f"origin/{branch}" if ref_check.returncode == 0 else branch
-                # Insert ref before filters: git log <ref> --author=...
-                cmd = ["git", "-C", project_path, "log", ref,
-                       f"--author={user_email}", f"--since={since}",
-                       "--no-merges", "--name-only", "--pretty=format:"]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if result.returncode != 0:
-                return set()
-            files = set()
-            for line in result.stdout.splitlines():
-                p = line.strip().replace("\\", "/").lstrip("./")
-                if p:
-                    files.add(p)
+
+            files: set = set()
+            for pattern in candidates:
+                base = ["git", "-C", project_path, "log"]
+                if ref:
+                    base.append(ref)
+                base += [f"--author={pattern}", f"--since={since}",
+                         "--no-merges", "--name-only", "--pretty=format:", "-i"]
+                result = subprocess.run(base, capture_output=True, text=True, timeout=60)
+                if result.returncode != 0:
+                    continue
+                for line in result.stdout.splitlines():
+                    p = line.strip().replace("\\", "/").lstrip("./")
+                    if p:
+                        files.add(p)
+                # If the full email already found files, don't broaden to
+                # looser patterns (avoids cross-user collisions).
+                if files and pattern == user_email:
+                    return files
             return files
         except Exception as e:
             print(f"[Analytics] get_files_touched_by_user error: {e}")
@@ -929,28 +998,30 @@ class AnalyticsTracker:
                             dev_latest_date = act['latest_commit_date']
                             dev_current_branch = act.get('current_branch')
 
-                    # For each branch the dev has commits on, attribute issues
-                    # using the UNIFIED (deduped, fixed-excluded) file map for
-                    # the project. This keeps per-dev totals aligned with
-                    # project totals and never double-counts or counts fixed work.
+                    # Attribute issues per-branch using THAT branch's own scan
+                    # (not the project's current-branch-filtered unified map).
+                    # Rationale: a dev working only on `develop` should still
+                    # get credit for the issues they introduced on `develop`,
+                    # even if those files don't exist on the project's
+                    # configured current branch.
                     scans_map = {s['branch']: s for s in scans_by_project.get(p['id'], [])}
-                    unified_files = project_unified.get(p['id'], {})
                     for br_info in act.get('branches', []):
                         br_name = br_info['name']
                         touched = self.get_files_touched_by_user(
                             p_path, email, since_days=days, branch=br_name
                         )
                         scan = scans_map.get(br_name)
+                        branch_files = _load_files_with_issues(scan) if scan else {}
                         attributed = 0
                         attr_errors = attr_warns = attr_infos = 0
-                        if touched and unified_files:
+                        if touched and branch_files:
                             for fp in touched:
-                                bucket = unified_files.get(fp)
+                                bucket = branch_files.get(fp)
                                 if bucket:
-                                    attributed += int(bucket.get('total', 0))
-                                    attr_errors += int(bucket.get('errors', 0))
-                                    attr_warns += int(bucket.get('warnings', 0))
-                                    attr_infos += int(bucket.get('infos', 0))
+                                    attributed += int(bucket.get('total', 0) or 0)
+                                    attr_errors += int(bucket.get('errors', 0) or 0)
+                                    attr_warns += int(bucket.get('warnings', 0) or 0)
+                                    attr_infos += int(bucket.get('infos', 0) or 0)
                         dev_branch_stats.append({
                             'name': br_name,
                             'project_id': p['id'],
@@ -972,6 +1043,15 @@ class AnalyticsTracker:
                             dev_quality_weighted.append(float(scan['quality_score']))
 
                 total_unique_commits += dev_total_commits
+
+                # Opt-in diagnostic: set CRA_DEBUG_ANALYTICS=1 to see why a
+                # developer shows 0 commits / 0 issues (usually an email
+                # mismatch between git config and dashboard login).
+                if os.getenv("CRA_DEBUG_ANALYTICS") == "1":
+                    print(f"[Analytics][{email}] commits={dev_total_commits} "
+                          f"files_touched={dev_files_touched} "
+                          f"branches_with_activity={len(dev_branch_stats)} "
+                          f"attributed_issues_max={dev_attributed_issues_max}")
 
                 # Sort branches by recency
                 dev_branch_stats.sort(key=lambda b: (b.get('last_date') or ''), reverse=True)
