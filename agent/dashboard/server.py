@@ -1494,7 +1494,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 if not url:
                     self._json_response({"error": "No webhook URL configured yet."}, 400)
                     return
-                tracker = get_tracker(db)
+                tracker = get_tracker()
                 summary = tracker.get_analytics_summary(
                     viewer_email=_current_user["email"], viewer_role="admin", days=1,
                 )
