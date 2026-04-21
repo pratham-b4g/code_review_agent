@@ -1722,8 +1722,8 @@
             <div class="card p-5" id="teamsReportCard">
               <div class="flex items-center justify-between mb-3">
                 <div>
-                  <h3 class="text-sm font-semibold text-white">Microsoft Teams Daily Report</h3>
-                  <p class="text-[11px] text-gray-500 mt-0.5">We'll post a summary card to your Teams chat/channel at your chosen time each day.</p>
+                  <h3 class="text-sm font-semibold text-white">Scheduled Report Delivery</h3>
+                  <p class="text-[11px] text-gray-500 mt-0.5">Automatically send analytics reports to your email and/or Microsoft Teams at your chosen schedule.</p>
                 </div>
                 <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
                   <input id="teamsReportEnabled" type="checkbox" class="accent-accent-blue w-4 h-4" />
@@ -1731,19 +1731,21 @@
                 </label>
               </div>
               <div class="space-y-3">
-                <div>
-                  <label class="block text-[11px] text-gray-400 mb-1">Power Automate webhook URL</label>
-                  <input id="teamsWebhookUrl" type="text" placeholder="https://prod-XX.westus.logic.azure.com/workflows/..."
-                         class="w-full px-3 py-2 bg-bg-dark border border-border-subtle rounded-lg text-xs text-white mono focus:outline-none focus:border-accent-blue" />
-                  <p class="text-[10px] text-gray-600 mt-1">
-                    Create a Power Automate flow: trigger <b class="text-gray-400">When a Teams webhook request is received</b> → action <b class="text-gray-400">Post adaptive card in a chat or channel</b>. Paste the generated URL above.
-                  </p>
-                </div>
                 <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-[11px] text-gray-400 mb-1">Report frequency</label>
+                    <select id="teamsReportFreq" class="w-full px-3 py-2 bg-bg-dark border border-border-subtle rounded-lg text-xs text-white focus:outline-none focus:border-accent-blue">
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly (Monday)</option>
+                      <option value="monthly">Monthly (1st of month)</option>
+                    </select>
+                  </div>
                   <div>
                     <label class="block text-[11px] text-gray-400 mb-1">Report time (24h)</label>
                     <input id="teamsReportTime" type="time" class="w-full px-3 py-2 bg-bg-dark border border-border-subtle rounded-lg text-xs text-white focus:outline-none focus:border-accent-blue" />
                   </div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
                   <div>
                     <label class="block text-[11px] text-gray-400 mb-1">Timezone</label>
                     <select id="teamsReportTz" class="w-full px-3 py-2 bg-bg-dark border border-border-subtle rounded-lg text-xs text-white focus:outline-none focus:border-accent-blue">
@@ -1758,6 +1760,20 @@
                       <option value="Australia/Sydney">Australia/Sydney</option>
                     </select>
                   </div>
+                  <div class="flex items-end">
+                    <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer pb-2">
+                      <input id="emailReportEnabled" type="checkbox" class="accent-accent-blue w-4 h-4" />
+                      <span>Also send to my email</span>
+                    </label>
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-[11px] text-gray-400 mb-1">Microsoft Teams webhook URL (optional)</label>
+                  <input id="teamsWebhookUrl" type="text" placeholder="https://prod-XX.westus.logic.azure.com/workflows/..."
+                         class="w-full px-3 py-2 bg-bg-dark border border-border-subtle rounded-lg text-xs text-white mono focus:outline-none focus:border-accent-blue" />
+                  <p class="text-[10px] text-gray-600 mt-1">
+                    For Teams delivery: Create a Power Automate flow with trigger <b class="text-gray-400">When a Teams webhook request is received</b> → action <b class="text-gray-400">Post adaptive card</b>. Paste the URL above.
+                  </p>
                 </div>
                 <div id="teamsReportStatus" class="text-[11px] text-gray-500"></div>
                 <div class="flex items-center gap-2">
@@ -1789,13 +1805,18 @@
           const url = document.getElementById('teamsWebhookUrl');
           const time = document.getElementById('teamsReportTime');
           const tz = document.getElementById('teamsReportTz');
+          const freq = document.getElementById('teamsReportFreq');
+          const emailEnabled = document.getElementById('emailReportEnabled');
           if (enabled) enabled.checked = !!s.report_enabled;
           if (url) url.value = s.teams_webhook_url || '';
           if (time) time.value = s.report_time || '';
           if (tz && s.report_timezone) tz.value = s.report_timezone;
+          if (freq && s.report_frequency) freq.value = s.report_frequency;
+          if (emailEnabled) emailEnabled.checked = !!s.email_reports_enabled;
           if (s.last_report_sent_on) {
             const st = document.getElementById('teamsReportStatus');
-            if (st) st.innerHTML = `<span class="text-accent-green">Last sent: ${s.last_report_sent_on}</span>`;
+            const freqLabel = s.report_frequency === 'weekly' ? 'week' : (s.report_frequency === 'monthly' ? 'month' : 'day');
+            if (st) st.innerHTML = `<span class="text-accent-green">Last ${freqLabel}ly report sent: ${s.last_report_sent_on}</span>`;
           }
         } catch (e) { console.error('report-settings load error', e); }
       }
@@ -1808,6 +1829,8 @@
         report_time:       document.getElementById('teamsReportTime')?.value || '',
         report_timezone:   document.getElementById('teamsReportTz')?.value || 'Asia/Kolkata',
         report_enabled:    !!document.getElementById('teamsReportEnabled')?.checked,
+        report_frequency:  document.getElementById('teamsReportFreq')?.value || 'daily',
+        email_reports_enabled: !!document.getElementById('emailReportEnabled')?.checked,
       };
       try {
         const r = await fetch('/api/me/report-settings', {

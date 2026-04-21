@@ -1443,9 +1443,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": "Forbidden: TL only"}, 403); return
             try:
                 db = _get_db()
-                # Minimal validation: webhook URL should be an HTTPS Azure
-                # Logic Apps / Power Automate endpoint. Reject obvious typos
-                # but don't be overly strict — corp tenants use custom subdomains.
+                # Minimal validation: webhook URL should be an HTTPS endpoint
                 url = (data.get("teams_webhook_url") or "").strip()
                 if url and not url.lower().startswith("https://"):
                     self._json_response({"error": "Webhook URL must start with https://"}, 400)
@@ -1457,6 +1455,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                             or not (0 <= int(parts[0]) < 24 and 0 <= int(parts[1]) < 60):
                         self._json_response({"error": "report_time must be HH:MM (24h)"}, 400)
                         return
+                # Validate frequency
+                freq = (data.get("report_frequency") or "daily").lower()
+                if freq not in ("daily", "weekly", "monthly"):
+                    self._json_response({"error": "report_frequency must be daily, weekly, or monthly"}, 400)
+                    return
                 ok = db.update_report_settings(
                     _current_user["email"],
                     teams_webhook_url=url if "teams_webhook_url" in data else None,
@@ -1465,6 +1468,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                                      if "report_timezone" in data else None,
                     report_enabled=bool(data.get("report_enabled"))
                                      if "report_enabled" in data else None,
+                    report_frequency=freq if "report_frequency" in data else None,
+                    email_reports_enabled=bool(data.get("email_reports_enabled"))
+                                     if "email_reports_enabled" in data else None,
                 )
                 self._json_response({"success": ok,
                                      "settings": db.get_report_settings(_current_user["email"])})

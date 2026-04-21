@@ -1,8 +1,8 @@
-"""In-process daily report scheduler.
+"""In-process scheduled report delivery.
 
 Started once by the dashboard server. A single background thread wakes
-every 30 s, checks each TL's `report_time` / `report_timezone`, and fires
-their Teams webhook at most once per local calendar day.
+every 30 s, checks each TL's `report_time` / `report_timezone` / `report_frequency`,
+and fires their Teams webhook or email at the appropriate interval.
 
 Design notes:
 - Uses `zoneinfo` (Python 3.9+). Falls back to UTC if the configured tz
@@ -11,8 +11,8 @@ Design notes:
   accidentally double-send.
 - We tolerate a ±5 minute firing window (e.g. if the machine was asleep)
   so a configured 18:30 still fires at 18:33 after a wake.
-- Only fires for `role='admin'` TLs. Super admin + developers are not
-  report recipients in this design.
+- Supports daily, weekly (Monday), and monthly (1st of month) frequencies.
+- Fires for admins and super_admins who have either Teams webhook OR email enabled.
 """
 from __future__ import annotations
 
@@ -61,64 +61,134 @@ def _parse_hhmm(value: str) -> Optional[tuple]:
     return None
 
 
-def _should_fire(now_local: datetime, hhmm: tuple, last_sent: Optional[date]) -> bool:
+def _should_fire(now_local: datetime, hhmm: tuple, last_sent: Optional[date],
+                 frequency: str = "daily") -> bool:
+    """Check if report should fire based on time window and frequency."""
     hh, mm = hhmm
     target = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
     delta = (now_local - target).total_seconds() / 60.0
     # Within [0, WINDOW_MINUTES] minutes AFTER the target time
     if not (0 <= delta <= _WINDOW_MINUTES):
         return False
-    # Not already sent today (local date)
+    
     today_local = now_local.date()
-    if last_sent == today_local:
-        return False
+    
+    # Check if already sent for this period
+    if last_sent is None:
+        return True
+    
+    freq = (frequency or "daily").lower()
+    
+    if freq == "daily":
+        # Not already sent today
+        return last_sent != today_local
+    
+    elif freq == "weekly":
+        # Only fire on Mondays, and not already sent this week
+        if now_local.weekday() != 0:  # Monday = 0
+            return False
+        # Check if sent in last 7 days (roughly same week)
+        days_since_last = (today_local - last_sent).days
+        return days_since_last >= 6
+    
+    elif freq == "monthly":
+        # Only fire on 1st of month, and not already sent this month
+        if today_local.day != 1:
+            return False
+        # Check if already sent this month
+        return last_sent.month != today_local.month or last_sent.year != today_local.year
+    
     return True
 
 
-def _send_report_for(db, tracker, notifier_mod, tl: dict,
+def _send_report_for(db, tracker, teams_mod, email_mod, tl: dict,
                      dashboard_url: str) -> bool:
-    """Build analytics, POST to Teams, mark success. Returns True on success."""
+    """Build analytics, send via Teams and/or email, mark success. Returns True if any sent."""
     email = tl["email"]
     tz_name = tl.get("report_timezone") or "Asia/Kolkata"
     now_local = _now_in_tz(tz_name)
-
-    # Use a 1-day window (yesterday's activity through now) to mirror the
-    # "daily report" semantics the existing CLI uses.
+    frequency = tl.get("report_frequency") or "daily"
+    
+    # Determine days window based on frequency
+    if frequency == "weekly":
+        days = 7
+    elif frequency == "monthly":
+        days = 30
+    else:
+        days = 1
+    
+    # Get analytics summary
     summary = tracker.get_analytics_summary(
-        viewer_email=email, viewer_role="admin", days=1
+        viewer_email=email, viewer_role="admin", days=days
     )
-    result = notifier_mod.send_team_report(
-        webhook_url=tl.get("teams_webhook_url") or "",
-        tl_name=tl.get("name") or email,
-        tl_email=email,
-        summary=summary,
-        developer_stats=summary.get("developers", []),
-        date_label=now_local.strftime("%A, %d %b %Y"),
-        dashboard_url=dashboard_url,
-    )
-    if result.get("ok"):
+    
+    date_label = now_local.strftime("%A, %d %b %Y")
+    any_success = False
+    
+    # Send to Teams if webhook configured
+    webhook_url = tl.get("teams_webhook_url") or ""
+    if webhook_url:
+        try:
+            result = teams_mod.send_team_report(
+                webhook_url=webhook_url,
+                tl_name=tl.get("name") or email,
+                tl_email=email,
+                summary=summary,
+                developer_stats=summary.get("developers", []),
+                date_label=date_label,
+                dashboard_url=dashboard_url,
+            )
+            if result.get("ok"):
+                print(f"[Scheduler] Teams report sent to {email} (HTTP {result.get('status')})")
+                any_success = True
+            else:
+                print(f"[Scheduler] Teams report FAILED for {email}: HTTP {result.get('status')} — {result.get('body')}")
+        except Exception as e:
+            print(f"[Scheduler] Teams report error for {email}: {e}")
+    
+    # Send email if enabled
+    email_enabled = tl.get("email_reports_enabled") or False
+    if email_enabled:
+        try:
+            ok = email_mod.send_daily_analytics_report(
+                tl_email=email,
+                tl_name=tl.get("name") or email,
+                date=date_label,
+                summary=summary,
+                developer_stats=summary.get("developers", []),
+            )
+            if ok:
+                print(f"[Scheduler] Email report sent to {email}")
+                any_success = True
+            else:
+                print(f"[Scheduler] Email report FAILED for {email}")
+        except Exception as e:
+            print(f"[Scheduler] Email report error for {email}: {e}")
+    
+    # Mark as sent if at least one channel succeeded
+    if any_success:
         try:
             db.mark_report_sent(email, now_local.date())
         except Exception as e:
             print(f"[Scheduler] mark_report_sent failed for {email}: {e}")
-        print(f"[Scheduler] Report sent to {email} (HTTP {result.get('status')})")
         return True
-    print(f"[Scheduler] Report FAILED for {email}: HTTP {result.get('status')} — "
-          f"{result.get('body')}")
+    
     return False
 
 
 def _tick(get_db, dashboard_url: str) -> None:
-    """Single pass: check every enabled TL and fire if due."""
+    """Single pass: check every enabled TL and fire if due based on frequency."""
     try:
         from agent.analytics import get_tracker
         from agent.utils import teams_notifier
+        from agent.utils.email_notifier import get_notifier as get_email_notifier
     except Exception as e:
         print(f"[Scheduler] import error: {e}")
         return
     try:
         db = get_db()
         tracker = get_tracker(db)
+        email_notifier = get_email_notifier()
     except Exception as e:
         print(f"[Scheduler] could not acquire DB/tracker: {e}")
         return
@@ -134,6 +204,7 @@ def _tick(get_db, dashboard_url: str) -> None:
         if not hhmm:
             continue
         tz_name = tl.get("report_timezone") or "Asia/Kolkata"
+        frequency = tl.get("report_frequency") or "daily"
         now_local = _now_in_tz(tz_name)
         last_sent = tl.get("last_report_sent_on")
         if hasattr(last_sent, "isoformat"):
@@ -141,9 +212,11 @@ def _tick(get_db, dashboard_url: str) -> None:
             last_sent_date = last_sent if isinstance(last_sent, date) else last_sent.date()
         else:
             last_sent_date = None
-        if _should_fire(now_local, hhmm, last_sent_date):
+        
+        if _should_fire(now_local, hhmm, last_sent_date, frequency):
+            print(f"[Scheduler] Firing {frequency} report for {tl.get('email')} at {now_local.strftime('%H:%M')}")
             try:
-                _send_report_for(db, tracker, teams_notifier, tl, dashboard_url)
+                _send_report_for(db, tracker, teams_notifier, email_notifier, tl, dashboard_url)
             except Exception as e:
                 print(f"[Scheduler] unexpected error for {tl.get('email')}: {e}")
 

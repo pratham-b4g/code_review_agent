@@ -174,6 +174,16 @@ class DatabaseManager:
                 except Exception:
                     pass
 
+                # Migration: report frequency and email delivery options
+                try:
+                    cur.execute("""
+                        ALTER TABLE users
+                            ADD COLUMN IF NOT EXISTS report_frequency VARCHAR(10) DEFAULT 'daily',
+                            ADD COLUMN IF NOT EXISTS email_reports_enabled BOOLEAN DEFAULT FALSE
+                    """)
+                except Exception:
+                    pass
+
                 # Analytics data (commits, issues, etc.)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS developer_analytics (
@@ -333,7 +343,8 @@ class DatabaseManager:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute("""
                         SELECT teams_webhook_url, report_time, report_timezone,
-                               report_enabled, last_report_sent_on
+                               report_enabled, last_report_sent_on,
+                               report_frequency, email_reports_enabled
                         FROM users WHERE email = %s
                     """, (email,))
                     row = cur.fetchone()
@@ -344,6 +355,8 @@ class DatabaseManager:
                         "report_time": row.get("report_time") or "",
                         "report_timezone": row.get("report_timezone") or "Asia/Kolkata",
                         "report_enabled": bool(row.get("report_enabled")),
+                        "report_frequency": row.get("report_frequency") or "daily",
+                        "email_reports_enabled": bool(row.get("email_reports_enabled")),
                         "last_report_sent_on": (row["last_report_sent_on"].isoformat()
                                                 if row.get("last_report_sent_on") else None),
                     }
@@ -355,7 +368,9 @@ class DatabaseManager:
                                teams_webhook_url: Optional[str] = None,
                                report_time: Optional[str] = None,
                                report_timezone: Optional[str] = None,
-                               report_enabled: Optional[bool] = None) -> bool:
+                               report_enabled: Optional[bool] = None,
+                               report_frequency: Optional[str] = None,
+                               email_reports_enabled: Optional[bool] = None) -> bool:
         """Partial update — only non-None fields are written."""
         sets = []
         params: List[Any] = []
@@ -368,6 +383,10 @@ class DatabaseManager:
             sets.append("report_timezone = %s"); params.append(report_timezone or "Asia/Kolkata")
         if report_enabled is not None:
             sets.append("report_enabled = %s"); params.append(bool(report_enabled))
+        if report_frequency is not None:
+            sets.append("report_frequency = %s"); params.append(report_frequency or "daily")
+        if email_reports_enabled is not None:
+            sets.append("email_reports_enabled = %s"); params.append(bool(email_reports_enabled))
         if not sets:
             return True
         params.append(email)
@@ -393,21 +412,24 @@ class DatabaseManager:
             print(f"[DB Error] mark_report_sent: {e}")
 
     def get_tls_with_schedules(self) -> List[Dict[str, Any]]:
-        """Return every admin who has a webhook + time + is enabled."""
+        """Return every admin who has report enabled + time + (webhook OR email enabled)."""
         try:
             with self.connect() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute("""
                         SELECT email, name, teams_webhook_url, report_time,
-                               report_timezone, last_report_sent_on
+                               report_timezone, last_report_sent_on,
+                               report_frequency, email_reports_enabled
                         FROM users
-                        WHERE role = 'admin'
+                        WHERE role IN ('admin', 'super_admin')
                           AND is_active = TRUE
                           AND report_enabled = TRUE
-                          AND teams_webhook_url IS NOT NULL
-                          AND teams_webhook_url <> ''
                           AND report_time IS NOT NULL
                           AND report_time <> ''
+                          AND (
+                              (teams_webhook_url IS NOT NULL AND teams_webhook_url <> '')
+                              OR email_reports_enabled = TRUE
+                          )
                     """)
                     return [dict(r) for r in (cur.fetchall() or [])]
         except Exception as e:
