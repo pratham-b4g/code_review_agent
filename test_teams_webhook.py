@@ -56,6 +56,7 @@ if __name__ == "__main__":
         summary=test_summary,
         developer_stats=test_devs,
         tl_name="Team Lead",
+        tl_email="akash.kothari@biz4group.com",
         date_label="2026-04-21",
         dashboard_url="http://localhost:9090"
     )

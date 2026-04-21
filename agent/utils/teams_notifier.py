@@ -37,12 +37,15 @@ GOOD = "Good"
 def build_adaptive_card(summary: Dict[str, Any],
                         developer_stats: List[Dict[str, Any]],
                         tl_name: str,
+                        tl_email: str,
                         date_label: str,
                         dashboard_url: str = "http://localhost:9090") -> Dict[str, Any]:
     """Return an Adaptive Card JSON wrapped in the Power Automate payload.
 
+    Includes recipient info so Power Automate can route dynamically.
     Power Automate's "Post adaptive card in a chat" action expects:
-      { "type": "message",
+      { "recipient": "user@email.com",
+        "type": "message",
         "attachments": [ { "contentType": "application/vnd.microsoft.card.adaptive",
                            "content": <adaptive card> } ] }
     """
@@ -179,7 +182,12 @@ def build_adaptive_card(summary: Dict[str, Any],
         })
         card["body"].extend(proj_lines)
 
+    # Return both the Adaptive Card and recipient for dynamic routing in Power Automate
     return {
+        "recipient": tl_email,
+        "recipient_name": tl_name,
+        "report_type": "code_review_analytics",
+        "date": date_label,
         "type": "message",
         "attachments": [
             {
@@ -219,6 +227,7 @@ def send_team_report(webhook_url: str, tl_name: str, tl_email: str,
         summary=summary,
         developer_stats=developer_stats,
         tl_name=tl_name or tl_email,
+        tl_email=tl_email,
         date_label=date_label,
         dashboard_url=dashboard_url,
     )
