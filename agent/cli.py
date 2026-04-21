@@ -661,7 +661,7 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
 
         try:
             db = DatabaseManager()
-            tracker = get_tracker(db)
+            tracker = get_tracker()
 
             tls = db.get_all_users(role='admin')
             if target_email:
