@@ -42,14 +42,19 @@ To update to the latest version later, just run the same command again.
   ALL COMMANDS
 ========================================================================
 
-  cra review     Run a full code quality review
-  cra fix        Auto-fix common lint errors (ruff/eslint)
-  cra install    Install pre-push git hook into a repo
-  cra uninstall  Remove the pre-push hook
-  cra rules      List all available review rules
-  cra baseline   Save/manage tech-debt baselines
-  cra report     Generate a detailed Markdown report
-  cra setup-key  Configure API key for AI reviews
+  cra review        Run a full code quality review
+  cra fix           Auto-fix common lint errors (ruff/eslint)
+  cra install       Install pre-push git hook into a repo
+  cra uninstall     Remove the pre-push hook
+  cra rules         List all available review rules
+  cra baseline      Save/manage tech-debt baselines
+  cra report        Generate a detailed Markdown report
+  cra dashboard     Launch the web dashboard for a single project
+  cra admin         Launch the multi-user admin panel (Super Admin / TL)
+  cra setup         Interactive setup wizard (TL onboards a project)
+  cra setup-key     Configure API key for AI reviews
+  cra send-reports  Send daily analytics report to TLs (email or Teams)
+  cra set-teams-webhook  Configure Teams webhook for a TL (quick setup)
 
 Add --help to any command for detailed options and examples.
 
@@ -116,6 +121,94 @@ Creates cra-report.md with:
   cra rules --lang python
   cra rules --lang javascript
   cra rules --lang typescript --framework react
+
+
+========================================================================
+  DASHBOARD (web UI for a single project)
+========================================================================
+
+  cra dashboard                          # Scan CWD, open http://localhost:9090
+  cra dashboard --dir /path/to/project   # Scan a specific project
+  cra dashboard --port 8080              # Use a different port
+  cra dashboard --no-open                # Don't auto-open the browser
+
+What you get:
+  - Interactive UI showing violations per file
+  - Inline code highlighting with severity filters
+  - Duplication stats, dependency graph, trend charts
+  - One-click re-scan and filtering by rule / severity
+
+
+========================================================================
+  ADMIN PANEL (multi-user: Super Admin + TLs + Developers)
+========================================================================
+
+  cra admin                 # Open the multi-user dashboard
+  cra admin --port 8080     # Use a different port
+  cra admin --no-open       # Don't auto-open the browser
+
+Roles:
+  Super Admin  Create TLs, assign projects, see everything
+  TL (admin)   Manage developers, view team analytics, configure
+               per-TL Teams / email report delivery
+  Developer    See their own commits, issues, quality score
+
+Key views:
+  Dashboard    Team-wide open issues, quality, effort, activity trend
+  Projects     Per-project branch breakdown + force re-scan
+  Users        TL / developer management
+  Analytics    Per-developer contributions, charts, per-branch drill-down
+  Settings     Account info + Teams report scheduling (TL)
+
+
+========================================================================
+  TL SETUP WIZARD
+========================================================================
+
+  cra setup
+
+Interactive prompts that:
+  - Register a project on the central dashboard server
+  - Configure team settings + rule preferences
+  - Wire the local repo to the project_key used by the hook
+
+Run this once per project when first onboarding it to the admin panel.
+
+
+========================================================================
+  SCHEDULED REPORT DELIVERY (email / Microsoft Teams)
+========================================================================
+
+  cra send-reports                               # email, all TLs, yesterday
+  cra send-reports --days 7                      # weekly rollup via email
+  cra send-reports --teams                       # Teams, all TLs with a webhook
+  cra send-reports --teams --tl-email a@b.co     # test one TL's Teams webhook
+
+Quick webhook setup (no dashboard needed):
+  cra set-teams-webhook --email tl@company.com --url "https://..."
+  cra set-teams-webhook --email tl@company.com --url "https://..." --time "18:30"
+
+Preferred path: configure the per-TL schedule in the dashboard
+(Settings → Microsoft Teams Daily Report). The admin panel runs a
+background scheduler that fires each TL's report at their configured
+local time — no external cron needed.
+
+Legacy cron setup (still supported):
+  0 9 * * *   cra send-reports
+  30 18 * * * cra send-reports --teams
+
+Disable the in-process scheduler with:  CRA_DISABLE_REPORT_SCHEDULER=1
+
+
+========================================================================
+  AI API KEY (for --ai reviews)
+========================================================================
+
+  cra setup-key
+
+Interactively configures your API key for AI-powered deep reviews.
+The key is stored in ~/.cra/config (per-user) and never committed to git.
+Required before using:  cra review --ai
 
 
 ========================================================================

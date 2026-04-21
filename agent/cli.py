@@ -222,6 +222,24 @@ Cron setup (legacy; prefer dashboard per-TL scheduler):
   0 9 * * * cra send-reports
   30 18 * * * cra send-reports --teams
 """.strip(),
+
+    "set-teams-webhook": """
+Usage: cra set-teams-webhook --email EMAIL --url URL
+
+Quickly configure a Power Automate webhook URL for a TL.
+The TL must already exist in the system (use 'cra setup' first if needed).
+
+Options:
+  --email EMAIL     TL email address (required)
+  --url URL         Power Automate workflow URL (required)
+  --time TIME       Report time in HH:MM format (default: 09:00)
+  --timezone TZ     Timezone (default: Asia/Kolkata)
+  --enable          Enable scheduled reports (default: true)
+
+Examples:
+  cra set-teams-webhook --email tl@company.com --url "https://..."
+  cra set-teams-webhook --email tl@company.com --url "https://..." --time "18:30"
+""".strip(),
 }
 
 
@@ -243,6 +261,7 @@ Usage:
   python main.py dashboard [--dir PATH] [--port PORT]
   python main.py admin    [--port PORT]
   python main.py send-reports [--days DAYS]
+  python main.py set-teams-webhook --email EMAIL --url URL
 
 Options:
   --staged          Review only git-staged files (pre-commit mode)
@@ -700,6 +719,58 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
 
         except Exception as e:
             print(f"[ERROR] Failed to send reports: {e}")
+            return 1
+
+    # ── set-teams-webhook (quickly configure TL webhook) ────────────────
+    elif command == "set-teams-webhook":
+        email: Optional[str] = None
+        url: Optional[str] = None
+        report_time = "09:00"
+        timezone = "Asia/Kolkata"
+        enabled = True
+
+        for i, a in enumerate(args):
+            if a == "--email" and i + 1 < len(args):
+                email = args[i + 1].strip().lower()
+            elif a == "--url" and i + 1 < len(args):
+                url = args[i + 1].strip()
+            elif a == "--time" and i + 1 < len(args):
+                report_time = args[i + 1].strip()
+            elif a == "--timezone" and i + 1 < len(args):
+                timezone = args[i + 1].strip()
+            elif a == "--enable":
+                enabled = True
+            elif a == "--disable":
+                enabled = False
+
+        if not email or not url:
+            print("[ERROR] --email and --url are required")
+            print(_COMMAND_HELP.get("set-teams-webhook", ""))
+            return 2
+
+        from agent.database import DatabaseManager
+        try:
+            db = DatabaseManager()
+            user = db.get_user_by_email(email)
+            if not user:
+                print(f"[ERROR] TL with email '{email}' not found. Run 'cra setup' first.")
+                return 1
+
+            db.update_report_settings(
+                email=email,
+                teams_webhook_url=url,
+                report_time=report_time,
+                timezone=timezone,
+                teams_reports_enabled=enabled,
+            )
+            status = "enabled" if enabled else "disabled"
+            print(f"[OK] Teams webhook configured for {email}")
+            print(f"     URL: {url[:60]}...")
+            print(f"     Schedule: {report_time} ({timezone}) — {status}")
+            print(f"\nTest it: cra send-reports --teams --tl-email {email}")
+            return 0
+        except Exception as e:
+            print(f"[ERROR] Failed to save settings: {e}")
             return 1
 
     else:
