@@ -760,8 +760,8 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
                 email=email,
                 teams_webhook_url=url,
                 report_time=report_time,
-                timezone=timezone,
-                teams_reports_enabled=enabled,
+                report_timezone=timezone,
+                report_enabled=enabled,
             )
             status = "enabled" if enabled else "disabled"
             print(f"[OK] Teams webhook configured for {email}")
