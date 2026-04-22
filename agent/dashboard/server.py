@@ -1495,20 +1495,21 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     self._json_response({"error": "No webhook URL configured yet."}, 400)
                     return
                 tracker = get_tracker()
-                # For reports, show all projects (use super_admin scope)
-                summary = tracker.get_analytics_summary(
-                    viewer_email=_current_user["email"], viewer_role="super_admin", days=1,
+                # Get project-wise summary with severity breakdown and productivity metrics
+                projects_data = tracker.get_project_wise_summary(
+                    tl_email=_current_user["email"], days=1, viewer_role="super_admin"
                 )
                 host = self.headers.get("Host") or "localhost:9090"
-                result = teams_notifier.send_team_report(
-                    webhook_url=url,
+                # Build and send project-wise report
+                report_payload = teams_notifier.build_project_wise_report(
+                    projects_data=projects_data,
                     tl_name=_current_user.get("name") or _current_user["email"],
                     tl_email=_current_user["email"],
-                    summary=summary,
-                    developer_stats=summary.get("developers", []),
                     date_label=datetime.now().strftime("%A, %d %b %Y") + " (test)",
+                    report_type="daily",
                     dashboard_url=f"http://{host}",
                 )
+                result = teams_notifier.post_to_teams(url, report_payload)
                 self._json_response({
                     "success": bool(result.get("ok")),
                     "status":  result.get("status"),

@@ -117,27 +117,27 @@ def _send_report_for(db, tracker, teams_mod, email_mod, tl: dict,
     else:
         days = 1
     
-    # Get analytics summary
-    summary = tracker.get_analytics_summary(
-        viewer_email=email, viewer_role="admin", days=days
+    # Get project-wise summary with severity breakdown and productivity metrics
+    projects_data = tracker.get_project_wise_summary(
+        tl_email=email, days=days, viewer_role="super_admin"
     )
-    
+
     date_label = now_local.strftime("%A, %d %b %Y")
     any_success = False
-    
+
     # Send to Teams if webhook configured
     webhook_url = tl.get("teams_webhook_url") or ""
     if webhook_url:
         try:
-            result = teams_mod.send_team_report(
-                webhook_url=webhook_url,
+            report_payload = teams_mod.build_project_wise_report(
+                projects_data=projects_data,
                 tl_name=tl.get("name") or email,
                 tl_email=email,
-                summary=summary,
-                developer_stats=summary.get("developers", []),
                 date_label=date_label,
+                report_type=frequency,
                 dashboard_url=dashboard_url,
             )
+            result = teams_mod.post_to_teams(webhook_url, report_payload)
             if result.get("ok"):
                 print(f"[Scheduler] Teams report sent to {email} (HTTP {result.get('status')})")
                 any_success = True

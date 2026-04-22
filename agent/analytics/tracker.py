@@ -1233,8 +1233,165 @@ class AnalyticsTracker:
                 'error': str(e)
             }
 
+    def get_project_wise_summary(self, tl_email: str, days: int = 30,
+                                  viewer_role: str = "super_admin") -> List[Dict[str, Any]]:
+        """Get project-wise summary for Teams reports with severity breakdown.
 
-# Global instance
+        Returns data in format for build_project_wise_report():
+        [
+            {
+                "project_name": "seemyspace",
+                "project_id": 1,
+                "branches": [
+                    {
+                        "branch": "develop",
+                        "issues": 503,
+                        "quality_score": 72.9,
+                        "severity_breakdown": {
+                            "critical": 18,  # mapped from errors
+                            "high": 450,     # mapped from warnings
+                            "medium": 35,    # infos above threshold
+                            "low": 0         # remaining infos
+                        }
+                    }
+                ],
+                "developers": [
+                    {
+                        "name": "Devendra Singh",
+                        "email": "devendra@example.com",
+                        "branch": "develop",
+                        "commits": 5,
+                        "issues": 66,
+                        "quality_score": 72.9,
+                        "productive_hours": 40,
+                        "extra_hours": 8,
+                        "critical_issues": [...],
+                        "high_issues": [...]
+                    }
+                ]
+            }
+        ]
+        """
+        try:
+            # Get base analytics data
+            base_summary = self.get_analytics_summary(
+                viewer_email=tl_email,
+                viewer_role=viewer_role,
+                days=days
+            )
+
+            projects_data = []
+            project_summaries = base_summary.get('project_summary', [])
+            developers = base_summary.get('developers', [])
+
+            for proj in project_summaries:
+                proj_id = proj.get('project_id', 0)
+                proj_name = proj.get('project_name', 'Unknown')
+
+                # Transform branch data with severity mapping
+                branches_data = []
+                for br in proj.get('branches', []):
+                    errors = int(br.get('errors', 0))
+                    warnings = int(br.get('warnings', 0))
+                    infos = int(br.get('infos', 0))
+
+                    # Map existing categories to severity levels
+                    # errors → critical, warnings → high, infos split → medium/low
+                    severity_breakdown = {
+                        "critical": errors,  # All errors are critical
+                        "high": warnings,    # All warnings are high
+                        "medium": min(infos, 50),  # First 50 infos are medium
+                        "low": max(0, infos - 50)  # Remaining infos are low
+                    }
+
+                    branches_data.append({
+                        "branch": br.get('branch', 'unknown'),
+                        "issues": int(br.get('issues', 0)),
+                        "quality_score": br.get('quality', 0) or 0,
+                        "is_current": br.get('is_current', False),
+                        "severity_breakdown": severity_breakdown,
+                        "errors": errors,
+                        "warnings": warnings,
+                        "infos": infos
+                    })
+
+                # Find developers assigned to this project
+                proj_developers = []
+                for dev in developers:
+                    dev_projects = dev.get('projects', [])
+                    if proj_name in dev_projects or str(proj_id) in str(dev_projects):
+                        # Calculate productivity metrics
+                        commits = dev.get('commits', 0)
+                        issues = dev.get('issues', 0)
+                        effort = dev.get('effort_score', 0)
+
+                        # Productive hours = effort hours for normal work
+                        # Extra hours = additional time spent fixing bugs (estimated)
+                        # Formula: 1 hour per commit + 0.5 hour per issue for fixes
+                        productive_hours = round(commits * 0.5, 1)  # 30 min per commit
+                        extra_hours = round(issues * 0.3, 1)  # 18 min per issue fix
+
+                        # Get attributed issues with severity
+                        critical_issues = []
+                        high_issues = []
+
+                        # Check branch stats for detailed issue info
+                        for br_stat in dev.get('branch_stats', []):
+                            if br_stat.get('project_name') == proj_name:
+                                # Map errors/warnings to critical/high
+                                err_count = br_stat.get('errors', 0)
+                                warn_count = br_stat.get('warnings', 0)
+
+                                # Create synthetic issue entries for display
+                                if err_count > 0:
+                                    critical_issues.append({
+                                        "message": f"{err_count} critical code issues",
+                                        "file": "See dashboard for details",
+                                        "severity": "critical"
+                                    })
+                                if warn_count > 0:
+                                    high_issues.append({
+                                        "message": f"{warn_count} high priority warnings",
+                                        "file": "See dashboard for details",
+                                        "severity": "high"
+                                    })
+
+                        proj_developers.append({
+                            "name": dev.get('name', dev.get('email', 'Unknown')),
+                            "email": dev.get('email', ''),
+                            "branch": dev.get('current_branch', 'develop'),
+                            "commits": commits,
+                            "issues": issues,
+                            "quality_score": dev.get('quality_score', 0),
+                            "productive_hours": productive_hours,
+                            "extra_hours": extra_hours,
+                            "critical_issues": critical_issues[:3],  # Top 3
+                            "high_issues": high_issues[:2]  # Top 2
+                        })
+
+                # Calculate project totals
+                total_commits = sum(d.get('commits', 0) for d in proj_developers)
+                total_issues = proj.get('deduped_total', 0)
+
+                projects_data.append({
+                    "project_name": proj_name,
+                    "project_id": proj_id,
+                    "branches": branches_data,
+                    "developers": proj_developers,
+                    "total_commits": total_commits,
+                    "total_issues": total_issues
+                })
+
+            return projects_data
+
+        except Exception as e:
+            import traceback
+            print(f"[Analytics] Error getting project-wise summary: {e}")
+            traceback.print_exc()
+            return []
+
+
+# Global tracker instance
 _tracker: Optional[AnalyticsTracker] = None
 
 
