@@ -118,7 +118,7 @@ def build_project_wise_report(
                 "isSubtle": True
             })
 
-        # Severity breakdown - only for develop branch or main branch
+        # Severity breakdown - use project quality score (average of branches)
         develop_branch = next((b for b in branches if b.get("branch") in ["develop", "main", "master"]), None)
         if develop_branch:
             severity = develop_branch.get("severity_breakdown", {})
@@ -126,7 +126,8 @@ def build_project_wise_report(
             high = severity.get("high", 0)
             medium = severity.get("medium", 0)
             low = severity.get("low", 0)
-            quality = develop_branch.get("quality_score", 0)
+            # Use project-level quality score (calculated as average of all branches)
+            quality = project.get("quality_score", develop_branch.get("quality_score", 0))
 
             card_body.append({
                 "type": "FactSet",

@@ -1115,6 +1115,7 @@ class AnalyticsTracker:
                             'errors': attr_errors,
                             'warnings': attr_warns,
                             'infos': attr_infos,
+                            'files_with_issues': branch_files if branch_files else {},
                             'quality': (float(scan['quality_score']) if scan and scan.get('quality_score') is not None else None),
                             'scanned_at': (scan.get('scanned_at').isoformat() if scan and hasattr(scan.get('scanned_at'), 'isoformat')
                                             else (str(scan.get('scanned_at')) if scan else None)),
@@ -1295,6 +1296,10 @@ class AnalyticsTracker:
                 for rb in raw_branches:
                     print(f"  Branch {rb.get('branch')}: quality_score={rb.get('quality_score')}, issues={rb.get('issues')}")
 
+                # Calculate project quality as average of branch qualities
+                branch_qualities = [br.get('quality_score') for br in raw_branches if br.get('quality_score') is not None]
+                project_quality = round(sum(branch_qualities) / len(branch_qualities), 1) if branch_qualities else 0
+
                 # Transform branch data with severity mapping
                 branches_data = []
                 for br in raw_branches:
@@ -1332,10 +1337,12 @@ class AnalyticsTracker:
                         issues = dev.get('issues', 0)
                         effort = dev.get('effort_score', 0)
 
-                        # Productive hours = effort hours for normal work
-                        # Extra hours = additional time spent fixing bugs (estimated)
-                        productive_hours = round(commits * 0.5, 1)  # 30 min per commit
-                        extra_hours = round(issues * 0.3, 1)  # 18 min per issue fix
+                        # Productive hours = time writing productive code
+                        # Extra hours = time spent fixing bugs/issues
+                        # Formula: 1 hour per commit is productive time
+                        # Issues consume extra time - 20 min per issue for fixing
+                        productive_hours = round(commits * 1.0, 1)  # 1 hour per commit
+                        extra_hours = round(issues * 0.33, 1)  # 20 min per issue fix
 
                         # Get issue counts from branch stats
                         critical_count = 0
@@ -1357,30 +1364,38 @@ class AnalyticsTracker:
                                 medium_count = min(info_count, 50)  # First 50 infos = medium
                                 low_count = max(0, info_count - 50)  # Rest = low
 
+                                # Get top files with issues from branch stats
+                                files_with_issues = br_stat.get('files_with_issues', {}) or {}
+                                top_files = sorted(files_with_issues.items(), 
+                                                   key=lambda x: x[1].get('total', 0) if isinstance(x[1], dict) else 0,
+                                                   reverse=True)[:3]
+                                file_list = [f[0] for f in top_files] if top_files else [f"{br_stat.get('branch', 'unknown')} branch"]
+                                file_display = ", ".join(file_list[:2]) if len(file_list) > 1 else file_list[0] if file_list else br_stat.get('branch', 'unknown')
+
                                 # Generate detailed issue information with explanations
                                 if err_count > 0:
                                     issue_details.append({
                                         "title": "Critical Code Quality Issues",
-                                        "file": br_stat.get('branch', 'unknown'),
+                                        "file": file_display,
                                         "severity": "critical",
-                                        "explanation": f"Found {err_count} critical errors that could cause application crashes, security vulnerabilities, or data loss.",
-                                        "fix": "Review error logs in dashboard and fix syntax errors, undefined variables, and security issues immediately."
+                                        "explanation": f"Found {err_count} critical errors in {len(files_with_issues)} files that could cause crashes or security issues.",
+                                        "fix": "Fix syntax errors, undefined variables, and security vulnerabilities immediately. Check files: " + file_display
                                     })
                                 if warn_count > 0:
                                     issue_details.append({
                                         "title": "High Priority Warnings",
-                                        "file": br_stat.get('branch', 'unknown'),
+                                        "file": file_display,
                                         "severity": "high",
-                                        "explanation": f"Found {warn_count} warnings indicating code smells, potential bugs, or performance issues.",
-                                        "fix": "Refactor code to follow best practices, remove unused imports, and fix logic errors."
+                                        "explanation": f"Found {warn_count} warnings indicating code smells and potential bugs in {len(files_with_issues)} files.",
+                                        "fix": "Refactor code to follow best practices. Review files: " + file_display
                                     })
                                 if info_count > 0:
                                     issue_details.append({
                                         "title": "Code Style & Minor Issues",
-                                        "file": br_stat.get('branch', 'unknown'),
+                                        "file": file_display,
                                         "severity": "medium" if info_count <= 50 else "low",
-                                        "explanation": f"Found {info_count} style issues, formatting inconsistencies, or minor improvements.",
-                                        "fix": "Run code formatter (black/isort) and address style guide violations when convenient."
+                                        "explanation": f"Found {info_count} style issues across {len(files_with_issues)} files.",
+                                        "fix": "Run code formatter on files: " + file_display
                                     })
 
                         proj_developers.append({
@@ -1406,6 +1421,7 @@ class AnalyticsTracker:
                 projects_data.append({
                     "project_name": proj_name,
                     "project_id": proj_id,
+                    "quality_score": project_quality,
                     "branches": branches_data,
                     "developers": proj_developers,
                     "total_commits": total_commits,
