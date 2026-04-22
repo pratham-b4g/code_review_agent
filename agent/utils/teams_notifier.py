@@ -40,14 +40,17 @@ def build_adaptive_card(summary: Dict[str, Any],
                         tl_email: str,
                         date_label: str,
                         dashboard_url: str = "http://localhost:9090") -> Dict[str, Any]:
-    """Return an Adaptive Card JSON for Microsoft Teams.
+    """Return a report payload with recipient and Adaptive Card for Microsoft Teams.
 
-    This returns a clean Adaptive Card object that can be used with:
-    1. Power Automate's "Post adaptive card in a chat" action (pass the card directly)
-    2. Teams Incoming Webhooks (wrap in { "type": "message", "attachments": [...] })
+    Returns a dict containing:
+      { "recipient": "user@email.com",
+        "recipient_name": "User Name",
+        "date": "2026-04-21",
+        "card": { <Adaptive Card JSON> } }
 
-    The returned format is the raw Adaptive Card JSON:
-      { "type": "AdaptiveCard", "version": "1.4", "body": [...], "actions": [...] }
+    For Power Automate:
+    - Use triggerBody()['recipient'] for the "Recipient" field (dynamic routing)
+    - Use triggerBody()['card'] for the "Adaptive Card" field (the actual card)
     """
     total_commits   = int(summary.get("total_commits", 0) or 0)
     total_issues    = int(summary.get("total_issues", 0) or 0)
@@ -182,15 +185,24 @@ def build_adaptive_card(summary: Dict[str, Any],
         })
         card["body"].extend(proj_lines)
 
-    # Return the raw Adaptive Card for Power Automate
-    # The caller (or Power Automate) should wrap this in a message envelope if needed
-    return card
+    # Return both the raw Adaptive Card AND recipient info for Power Automate
+    # Power Automate can extract: triggerBody()['recipient'] for dynamic routing
+    # and triggerBody()['card'] for the actual Adaptive Card content
+    return {
+        "recipient": tl_email,
+        "recipient_name": tl_name,
+        "date": date_label,
+        "card": card,  # The actual Adaptive Card goes here
+    }
 
 
-def post_to_teams(webhook_url: str, card: Dict[str, Any], timeout: float = 15.0) -> Dict[str, Any]:
-    """POST the Adaptive Card to a Power Automate webhook.
+def post_to_teams(webhook_url: str, payload: Dict[str, Any], timeout: float = 15.0) -> Dict[str, Any]:
+    """POST the payload to a Power Automate webhook.
 
-    Automatically wraps the card in the Teams message envelope format.
+    The payload should contain: { "recipient": "email", "card": {...}, ... }
+    For Power Automate, we send the full payload including recipient for dynamic routing.
+    For Teams webhook format, we wrap the card in the message envelope.
+
     Returns `{ ok, status, body }`. Never raises — callers log + move on.
     """
     if not webhook_url:
@@ -198,17 +210,9 @@ def post_to_teams(webhook_url: str, card: Dict[str, Any], timeout: float = 15.0)
     if requests is None:
         return {"ok": False, "status": 0, "body": "requests library not installed"}
 
-    # Wrap the adaptive card in the Teams message format expected by Power Automate
-    payload = {
-        "type": "message",
-        "attachments": [
-            {
-                "contentType": "application/vnd.microsoft.card.adaptive",
-                "content": card,
-            }
-        ]
-    }
-
+    # Send the full payload including recipient info
+    # Power Automate will extract recipient from triggerBody()['recipient']
+    # and the card from triggerBody()['card']
     try:
         r = requests.post(webhook_url, json=payload, timeout=timeout,
                           headers={"Content-Type": "application/json"})
@@ -225,6 +229,7 @@ def send_team_report(webhook_url: str, tl_name: str, tl_email: str,
                      date_label: str,
                      dashboard_url: str = "http://localhost:9090") -> Dict[str, Any]:
     """Convenience: build + send. Returns the post result dict."""
+    # build_adaptive_card now returns { "recipient": ..., "card": ... }
     payload = build_adaptive_card(
         summary=summary,
         developer_stats=developer_stats,
@@ -233,4 +238,5 @@ def send_team_report(webhook_url: str, tl_name: str, tl_email: str,
         date_label=date_label,
         dashboard_url=dashboard_url,
     )
+    # Send the full payload including recipient for Power Automate dynamic routing
     return post_to_teams(webhook_url, payload)
