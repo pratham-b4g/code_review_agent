@@ -1289,9 +1289,15 @@ class AnalyticsTracker:
                 proj_id = proj.get('project_id', 0)
                 proj_name = proj.get('project_name', 'Unknown')
 
+                # Debug: print incoming branch data
+                raw_branches = proj.get('branches', [])
+                print(f"[DEBUG] Project {proj_name}: {len(raw_branches)} branches")
+                for rb in raw_branches:
+                    print(f"  Branch {rb.get('branch')}: quality_score={rb.get('quality_score')}, issues={rb.get('issues')}")
+
                 # Transform branch data with severity mapping
                 branches_data = []
-                for br in proj.get('branches', []):
+                for br in raw_branches:
                     errors = int(br.get('errors', 0))
                     warnings = int(br.get('warnings', 0))
                     infos = int(br.get('infos', 0))
