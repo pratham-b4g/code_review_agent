@@ -40,14 +40,14 @@ def build_adaptive_card(summary: Dict[str, Any],
                         tl_email: str,
                         date_label: str,
                         dashboard_url: str = "http://localhost:9090") -> Dict[str, Any]:
-    """Return an Adaptive Card JSON wrapped in the Power Automate payload.
+    """Return an Adaptive Card JSON for Microsoft Teams.
 
-    Includes recipient info so Power Automate can route dynamically.
-    Power Automate's "Post adaptive card in a chat" action expects:
-      { "recipient": "user@email.com",
-        "type": "message",
-        "attachments": [ { "contentType": "application/vnd.microsoft.card.adaptive",
-                           "content": <adaptive card> } ] }
+    This returns a clean Adaptive Card object that can be used with:
+    1. Power Automate's "Post adaptive card in a chat" action (pass the card directly)
+    2. Teams Incoming Webhooks (wrap in { "type": "message", "attachments": [...] })
+
+    The returned format is the raw Adaptive Card JSON:
+      { "type": "AdaptiveCard", "version": "1.4", "body": [...], "actions": [...] }
     """
     total_commits   = int(summary.get("total_commits", 0) or 0)
     total_issues    = int(summary.get("total_issues", 0) or 0)
@@ -182,31 +182,33 @@ def build_adaptive_card(summary: Dict[str, Any],
         })
         card["body"].extend(proj_lines)
 
-    # Return both the Adaptive Card and recipient for dynamic routing in Power Automate
-    return {
-        "recipient": tl_email,
-        "recipient_name": tl_name,
-        "report_type": "code_review_analytics",
-        "date": date_label,
-        "type": "message",
-        "attachments": [
-            {
-                "contentType": "application/vnd.microsoft.card.adaptive",
-                "content": card,
-            }
-        ],
-    }
+    # Return the raw Adaptive Card for Power Automate
+    # The caller (or Power Automate) should wrap this in a message envelope if needed
+    return card
 
 
-def post_to_teams(webhook_url: str, payload: Dict[str, Any], timeout: float = 15.0) -> Dict[str, Any]:
-    """POST the Adaptive Card payload to a Power Automate webhook.
+def post_to_teams(webhook_url: str, card: Dict[str, Any], timeout: float = 15.0) -> Dict[str, Any]:
+    """POST the Adaptive Card to a Power Automate webhook.
 
+    Automatically wraps the card in the Teams message envelope format.
     Returns `{ ok, status, body }`. Never raises — callers log + move on.
     """
     if not webhook_url:
         return {"ok": False, "status": 0, "body": "empty webhook url"}
     if requests is None:
         return {"ok": False, "status": 0, "body": "requests library not installed"}
+
+    # Wrap the adaptive card in the Teams message format expected by Power Automate
+    payload = {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": card,
+            }
+        ]
+    }
+
     try:
         r = requests.post(webhook_url, json=payload, timeout=timeout,
                           headers={"Content-Type": "application/json"})

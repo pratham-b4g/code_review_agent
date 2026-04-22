@@ -51,8 +51,8 @@ test_devs = [
 ]
 
 if __name__ == "__main__":
-    print("Building Adaptive Card payload...")
-    payload = build_adaptive_card(
+    print("Building Adaptive Card...")
+    card = build_adaptive_card(
         summary=test_summary,
         developer_stats=test_devs,
         tl_name="Team Lead",
@@ -60,15 +60,27 @@ if __name__ == "__main__":
         date_label="2026-04-21",
         dashboard_url="http://localhost:9090"
     )
-    
+
+    # Wrap for Teams webhook format
+    payload = {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": card
+            }
+        ]
+    }
+
     print("\nPayload preview (first 800 chars):")
     print(json.dumps(payload, indent=2)[:800] + "...")
     
     print("\nSending to Teams via Power Automate...")
-    result = post_to_teams(WEBHOOK_URL, payload)
-    
+    # post_to_teams now expects the raw card and wraps it internally
+    result = post_to_teams(WEBHOOK_URL, card)
+
     print(f"\nResult: {result}")
-    
+
     if result["ok"]:
         print("\n✅ SUCCESS! Check your Teams channel for the report.")
         sys.exit(0)
