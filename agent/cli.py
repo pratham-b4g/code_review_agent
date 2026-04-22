@@ -682,8 +682,9 @@ def run_cli(argv: Optional[List[str]] = None) -> int:
                     url = (settings or {}).get('teams_webhook_url') or ''
                     if not url:
                         print(f"  - {tl['email']}: no webhook configured, skipping"); continue
+                    # For reports, show all projects (use super_admin scope)
                     summary = tracker.get_analytics_summary(
-                        viewer_email=tl['email'], viewer_role='admin', days=days
+                        viewer_email=tl['email'], viewer_role='super_admin', days=days
                     )
                     result = teams_notifier.send_team_report(
                         webhook_url=url, tl_name=tl['name'], tl_email=tl['email'],
