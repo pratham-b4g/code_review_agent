@@ -205,43 +205,101 @@ def build_project_wise_report(
                 }
 
                 # Add expandable issue details if there are critical/high issues
-                critical_issues = dev.get("critical_issues", [])
-                high_issues = dev.get("high_issues", [])
+                critical_count = dev.get("critical_count", 0)
+                high_count = dev.get("high_count", 0)
+                medium_count = dev.get("medium_count", 0)
+                low_count = dev.get("low_count", 0)
+                total_severity_issues = critical_count + high_count + medium_count + low_count
 
-                if critical_issues or high_issues:
+                issue_details = dev.get("issue_details", [])
+
+                if total_severity_issues > 0:
                     issue_items = []
-                    for issue in critical_issues[:3]:  # Show top 3 critical
+
+                    # Header showing breakdown
+                    issue_items.append({
+                        "type": "TextBlock",
+                        "text": f"**Issue Breakdown:** 🔴{critical_count} 🟠{high_count} 🔵{medium_count} 🟢{low_count}",
+                        "size": "Small",
+                        "weight": "Bolder",
+                        "spacing": "Small"
+                    })
+                    issue_items.append({"type": "TextBlock", "text": "", "spacing": "Small"})
+
+                    # Show actual issue details with explanations
+                    for detail in issue_details[:10]:  # Show top 10 issues
+                        severity = detail.get("severity", "info")
+                        color = SEVERITY_COLORS.get(severity, "Default")
+                        emoji = "🔴" if severity == "critical" else "🟠" if severity == "high" else "🔵" if severity == "medium" else "🟢"
+
+                        issue_container = {
+                            "type": "Container",
+                            "style": "emphasis" if severity in ["critical", "high"] else "default",
+                            "items": [
+                                {
+                                    "type": "TextBlock",
+                                    "text": f"{emoji} **{detail.get('title', 'Issue')}**",
+                                    "size": "Small",
+                                    "weight": "Bolder",
+                                    "color": color,
+                                    "wrap": True
+                                },
+                                {
+                                    "type": "TextBlock",
+                                    "text": f"📁 File: `{detail.get('file', 'unknown')}`",
+                                    "size": "Small",
+                                    "isSubtle": True,
+                                    "wrap": True
+                                }
+                            ],
+                            "spacing": "Small"
+                        }
+
+                        # Add explanation if available
+                        if detail.get("explanation"):
+                            issue_container["items"].append({
+                                "type": "TextBlock",
+                                "text": f"� **Why:** {detail.get('explanation')}",
+                                "size": "Small",
+                                "wrap": True
+                            })
+
+                        # Add fix suggestion if available
+                        if detail.get("fix"):
+                            issue_container["items"].append({
+                                "type": "TextBlock",
+                                "text": f"🔧 **Fix:** {detail.get('fix')}",
+                                "size": "Small",
+                                "color": "Good",
+                                "wrap": True
+                            })
+
+                        issue_items.append(issue_container)
+
+                    # Show message if more issues exist
+                    if len(issue_details) > 10:
                         issue_items.append({
                             "type": "TextBlock",
-                            "text": f"� {issue.get('message', 'Critical issue')} ({issue.get('file', 'unknown')})",
+                            "text": f"... and {len(issue_details) - 10} more issues. View full details in dashboard.",
                             "size": "Small",
-                            "color": "Attention",
-                            "wrap": True
-                        })
-                    for issue in high_issues[:2]:  # Show top 2 high
-                        issue_items.append({
-                            "type": "TextBlock",
-                            "text": f"🟠 {issue.get('message', 'High issue')} ({issue.get('file', 'unknown')})",
-                            "size": "Small",
-                            "color": "Warning",
-                            "wrap": True
+                            "isSubtle": True,
+                            "italic": True
                         })
 
-                    if issue_items:
-                        dev_container["items"].append({
-                            "type": "ActionSet",
-                            "actions": [{
-                                "type": "Action.ShowCard",
-                                "title": f"⚠️ View {len(critical_issues) + len(high_issues)} Issues",
-                                "card": {
-                                    "type": "AdaptiveCard",
-                                    "body": issue_items,
-                                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                                    "version": "1.4"
-                                }
-                            }],
-                            "spacing": "Small"
-                        })
+                    dev_container["items"].append({
+                        "type": "ActionSet",
+                        "actions": [{
+                            "type": "Action.ShowCard",
+                            "title": f"⚠️ View {total_severity_issues} Issues",
+                            "card": {
+                                "type": "AdaptiveCard",
+                                "body": issue_items,
+                                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                                "version": "1.4"
+                            }
+                        }],
+                        "spacing": "Small"
+                    })
 
                 card_body.append(dev_container)
 

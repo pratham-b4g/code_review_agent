@@ -1032,6 +1032,7 @@ class AnalyticsTracker:
                             'errors':  int(s.get('errors', 0) or 0),
                             'warnings': int(s.get('warnings', 0) or 0),
                             'infos':   int(s.get('infos', 0) or 0),
+                            'quality_score': float(s.get('quality_score', 0) or 0),
                             'scanned_at': (s.get('scanned_at').isoformat()
                                            if hasattr(s.get('scanned_at'), 'isoformat')
                                            else str(s.get('scanned_at'))),
@@ -1327,33 +1328,53 @@ class AnalyticsTracker:
 
                         # Productive hours = effort hours for normal work
                         # Extra hours = additional time spent fixing bugs (estimated)
-                        # Formula: 1 hour per commit + 0.5 hour per issue for fixes
                         productive_hours = round(commits * 0.5, 1)  # 30 min per commit
                         extra_hours = round(issues * 0.3, 1)  # 18 min per issue fix
 
-                        # Get attributed issues with severity
-                        critical_issues = []
-                        high_issues = []
+                        # Get issue counts from branch stats
+                        critical_count = 0
+                        high_count = 0
+                        medium_count = 0
+                        low_count = 0
+                        issue_details = []
 
                         # Check branch stats for detailed issue info
                         for br_stat in dev.get('branch_stats', []):
                             if br_stat.get('project_name') == proj_name:
-                                # Map errors/warnings to critical/high
-                                err_count = br_stat.get('errors', 0)
-                                warn_count = br_stat.get('warnings', 0)
+                                # Map errors/warnings/infos to severity levels
+                                err_count = br_stat.get('errors', 0) or 0
+                                warn_count = br_stat.get('warnings', 0) or 0
+                                info_count = br_stat.get('infos', 0) or 0
 
-                                # Create synthetic issue entries for display
+                                critical_count = err_count
+                                high_count = warn_count
+                                medium_count = min(info_count, 50)  # First 50 infos = medium
+                                low_count = max(0, info_count - 50)  # Rest = low
+
+                                # Generate detailed issue information with explanations
                                 if err_count > 0:
-                                    critical_issues.append({
-                                        "message": f"{err_count} critical code issues",
-                                        "file": "See dashboard for details",
-                                        "severity": "critical"
+                                    issue_details.append({
+                                        "title": "Critical Code Quality Issues",
+                                        "file": br_stat.get('branch', 'unknown'),
+                                        "severity": "critical",
+                                        "explanation": f"Found {err_count} critical errors that could cause application crashes, security vulnerabilities, or data loss.",
+                                        "fix": "Review error logs in dashboard and fix syntax errors, undefined variables, and security issues immediately."
                                     })
                                 if warn_count > 0:
-                                    high_issues.append({
-                                        "message": f"{warn_count} high priority warnings",
-                                        "file": "See dashboard for details",
-                                        "severity": "high"
+                                    issue_details.append({
+                                        "title": "High Priority Warnings",
+                                        "file": br_stat.get('branch', 'unknown'),
+                                        "severity": "high",
+                                        "explanation": f"Found {warn_count} warnings indicating code smells, potential bugs, or performance issues.",
+                                        "fix": "Refactor code to follow best practices, remove unused imports, and fix logic errors."
+                                    })
+                                if info_count > 0:
+                                    issue_details.append({
+                                        "title": "Code Style & Minor Issues",
+                                        "file": br_stat.get('branch', 'unknown'),
+                                        "severity": "medium" if info_count <= 50 else "low",
+                                        "explanation": f"Found {info_count} style issues, formatting inconsistencies, or minor improvements.",
+                                        "fix": "Run code formatter (black/isort) and address style guide violations when convenient."
                                     })
 
                         proj_developers.append({
@@ -1365,8 +1386,11 @@ class AnalyticsTracker:
                             "quality_score": dev.get('quality_score', 0),
                             "productive_hours": productive_hours,
                             "extra_hours": extra_hours,
-                            "critical_issues": critical_issues[:3],  # Top 3
-                            "high_issues": high_issues[:2]  # Top 2
+                            "critical_count": critical_count,
+                            "high_count": high_count,
+                            "medium_count": medium_count,
+                            "low_count": low_count,
+                            "issue_details": issue_details[:5]  # Top 5 issue types
                         })
 
                 # Calculate project totals
