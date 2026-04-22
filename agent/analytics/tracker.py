@@ -1308,7 +1308,7 @@ class AnalyticsTracker:
                     branches_data.append({
                         "branch": br.get('branch', 'unknown'),
                         "issues": int(br.get('issues', 0)),
-                        "quality_score": br.get('quality', 0) or 0,
+                        "quality_score": br.get('quality_score', 0) or 0,
                         "is_current": br.get('is_current', False),
                         "severity_breakdown": severity_breakdown,
                         "errors": errors,
