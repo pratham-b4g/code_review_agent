@@ -1,20 +1,6 @@
 """Microsoft Teams report delivery via Power Automate webhooks.
 
-Each TL creates a Power Automate flow with the trigger
-`When a Teams webhook request is received` and an action
-`Post adaptive card in a chat or channel`. The flow returns a URL that we
-POST an Adaptive Card JSON payload to.
-
-Why Adaptive Cards (and not MessageCard / legacy connector cards)?
-- Power Automate's "Post adaptive card" action takes an Adaptive Card 1.4+
-  payload directly as JSON.
-- Adaptive Cards render nicely on desktop + mobile Teams + Outlook.
-- The legacy MessageCard ("Office 365 Connector Card") format is part of
-  the retired connectors path and is discouraged for new integrations.
-
-The webhook URL format is expected to be a Logic Apps / Power Automate
-trigger URL (e.g. https://prod-XX.westus.logic.azure.com/workflows/.../triggers/manual/...).
-We don't hardcode any tenant — each TL pastes their own URL.
+Project-wise detailed reports with severity breakdown and expandable sections.
 """
 from __future__ import annotations
 
@@ -23,177 +9,313 @@ from typing import Any, Dict, List, Optional
 
 try:
     import requests
-except Exception:  # pragma: no cover - requests is a runtime dep of this package
+except Exception:
     requests = None  # type: ignore[assignment]
 
+# Severity colors for Teams Adaptive Cards
+SEVERITY_COLORS = {
+    "critical": "Attention",  # Red
+    "high": "Warning",        # Orange
+    "medium": "Accent",       # Blue
+    "low": "Good",           # Green
+    "error": "Attention",
+    "warning": "Warning",
+    "info": "Accent",
+}
 
-# Dark-blue accent matching the dashboard theme
-ACCENT_BLUE = "Accent"
-WARNING = "Warning"
-ATTENTION = "Attention"
-GOOD = "Good"
+
+def build_project_wise_report(
+    projects_data: List[Dict[str, Any]],
+    tl_name: str,
+    tl_email: str,
+    date_label: str,
+    report_type: str = "daily",  # "daily" or "monthly"
+    dashboard_url: str = "http://localhost:9090"
+) -> Dict[str, Any]:
+    """Build project-wise detailed report with severity breakdown.
+
+    Each project section includes:
+    - Project name (centered)
+    - Branch list with issue counts
+    - Severity breakdown (Critical, High, Medium, Low)
+    - Developer assignments with branch details
+    - Expandable issue lists
+    """
+    card_body = []
+
+    # Header
+    title = "📊 Code Review Agent — Monthly Report" if report_type == "monthly" else "📊 Code Review Agent — Daily Report"
+    card_body.append({
+        "type": "TextBlock",
+        "text": title,
+        "weight": "Bolder",
+        "size": "Large",
+        "color": "Accent",
+        "horizontalAlignment": "Center"
+    })
+    card_body.append({
+        "type": "TextBlock",
+        "text": f"Hi {tl_name}, here's your {report_type} summary for **{date_label}**.",
+        "wrap": True,
+        "spacing": "Small",
+        "isSubtle": True,
+        "horizontalAlignment": "Center"
+    })
+
+    # Overall summary (for monthly reports)
+    if report_type == "monthly":
+        total_commits = sum(p.get("total_commits", 0) for p in projects_data)
+        total_issues = sum(p.get("total_issues", 0) for p in projects_data)
+        card_body.append({
+            "type": "Container",
+            "style": "emphasis",
+            "items": [{
+                "type": "FactSet",
+                "facts": [
+                    {"title": "Total Projects", "value": str(len(projects_data))},
+                    {"title": "Monthly Commits", "value": str(total_commits)},
+                    {"title": "Total Open Issues", "value": str(total_issues)},
+                ]
+            }],
+            "spacing": "Medium"
+        })
+
+    # Per-project sections
+    for project in projects_data:
+        proj_name = project.get("project_name", "Unknown Project")
+        proj_id = project.get("project_id", 0)
+
+        # Project header with centered name
+        card_body.append({
+            "type": "Container",
+            "style": "emphasis",
+            "items": [{
+                "type": "TextBlock",
+                "text": f"🏢 {proj_name}",
+                "weight": "Bolder",
+                "size": "Medium",
+                "horizontalAlignment": "Center",
+                "color": "Accent"
+            }],
+            "spacing": "Large"
+        })
+
+        # Branches summary
+        branches = project.get("branches", [])
+        if branches:
+            branch_texts = []
+            for b in branches:
+                name = b.get("branch", "unknown")
+                issues = b.get("issues", 0)
+                current = "✓" if b.get("is_current") else ""
+                branch_texts.append(f"`{name}`:{issues}{current}")
+
+            card_body.append({
+                "type": "TextBlock",
+                "text": "Branches: " + " · ".join(branch_texts[:6]),
+                "wrap": True,
+                "size": "Small",
+                "isSubtle": True
+            })
+
+        # Severity breakdown - only for develop branch or main branch
+        develop_branch = next((b for b in branches if b.get("branch") in ["develop", "main", "master"]), None)
+        if develop_branch:
+            severity = develop_branch.get("severity_breakdown", {})
+            critical = severity.get("critical", 0)
+            high = severity.get("high", 0)
+            medium = severity.get("medium", 0)
+            low = severity.get("low", 0)
+            quality = develop_branch.get("quality_score", 0)
+
+            card_body.append({
+                "type": "FactSet",
+                "facts": [
+                    {"title": "Quality Score", "value": f"{quality}%"},
+                    {"title": "🔴 Critical", "value": str(critical)},
+                    {"title": "🟠 High", "value": str(high)},
+                    {"title": "🔵 Medium", "value": str(medium)},
+                    {"title": "🟢 Low", "value": str(low)},
+                ],
+                "spacing": "Small"
+            })
+
+        # Developers assigned to this project
+        developers = project.get("developers", [])
+        if developers:
+            card_body.append({
+                "type": "TextBlock",
+                "text": "👥 Developers",
+                "weight": "Bolder",
+                "size": "Small",
+                "spacing": "Medium"
+            })
+
+            for dev in developers:
+                dev_name = dev.get("name", dev.get("email", "Unknown"))
+                dev_branch = dev.get("branch", "develop")
+                dev_commits = dev.get("commits", 0)
+                dev_issues = dev.get("issues", 0)
+                dev_quality = dev.get("quality_score", 0)
+                productive_hours = dev.get("productive_hours", 0)
+                extra_hours = dev.get("extra_hours", 0)
+
+                # Developer card with expandable details
+                dev_container = {
+                    "type": "Container",
+                    "style": "default",
+                    "items": [
+                        {
+                            "type": "ColumnSet",
+                            "columns": [
+                                {
+                                    "type": "Column",
+                                    "width": "stretch",
+                                    "items": [{
+                                        "type": "TextBlock",
+                                        "text": f"**{dev_name}** ({dev_branch})",
+                                        "weight": "Bolder",
+                                        "size": "Small"
+                                    }]
+                                },
+                                {
+                                    "type": "Column",
+                                    "width": "auto",
+                                    "items": [{
+                                        "type": "TextBlock",
+                                        "text": f"{dev_commits} commits",
+                                        "size": "Small",
+                                        "isSubtle": True
+                                    }]
+                                }
+                            ]
+                        },
+                        {
+                            "type": "FactSet",
+                            "facts": [
+                                {"title": "Issues", "value": str(dev_issues)},
+                                {"title": "Quality", "value": f"{dev_quality}%"},
+                                {"title": "⏱️ Productive Hours", "value": str(productive_hours)},
+                                {"title": "⏰ Extra Hours", "value": str(extra_hours) if extra_hours > 0 else "None"},
+                            ],
+                            "spacing": "Small"
+                        }
+                    ],
+                    "spacing": "Small"
+                }
+
+                # Add expandable issue details if there are critical/high issues
+                critical_issues = dev.get("critical_issues", [])
+                high_issues = dev.get("high_issues", [])
+
+                if critical_issues or high_issues:
+                    issue_items = []
+                    for issue in critical_issues[:3]:  # Show top 3 critical
+                        issue_items.append({
+                            "type": "TextBlock",
+                            "text": f"� {issue.get('message', 'Critical issue')} ({issue.get('file', 'unknown')})",
+                            "size": "Small",
+                            "color": "Attention",
+                            "wrap": True
+                        })
+                    for issue in high_issues[:2]:  # Show top 2 high
+                        issue_items.append({
+                            "type": "TextBlock",
+                            "text": f"🟠 {issue.get('message', 'High issue')} ({issue.get('file', 'unknown')})",
+                            "size": "Small",
+                            "color": "Warning",
+                            "wrap": True
+                        })
+
+                    if issue_items:
+                        dev_container["items"].append({
+                            "type": "ActionSet",
+                            "actions": [{
+                                "type": "Action.ShowCard",
+                                "title": f"⚠️ View {len(critical_issues) + len(high_issues)} Issues",
+                                "card": {
+                                    "type": "AdaptiveCard",
+                                    "body": issue_items,
+                                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                                    "version": "1.4"
+                                }
+                            }],
+                            "spacing": "Small"
+                        })
+
+                card_body.append(dev_container)
+
+        # Separator between projects
+        card_body.append({"type": "TextBlock", "text": "", "spacing": "Large"})
+
+    # Footer actions
+    card = {
+        "type": "AdaptiveCard",
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "version": "1.4",
+        "msteams": {"width": "Full"},
+        "body": card_body,
+        "actions": [
+            {
+                "type": "Action.OpenUrl",
+                "title": "📊 Open Dashboard",
+                "url": dashboard_url,
+            },
+        ],
+    }
+
+    return {
+        "recipient": tl_email,
+        "recipient_name": tl_name,
+        "date": date_label,
+        "report_type": report_type,
+        "card": card,
+    }
 
 
+# Legacy function - kept for backward compatibility
 def build_adaptive_card(summary: Dict[str, Any],
                         developer_stats: List[Dict[str, Any]],
                         tl_name: str,
                         tl_email: str,
                         date_label: str,
                         dashboard_url: str = "http://localhost:9090") -> Dict[str, Any]:
-    """Return a report payload with recipient and Adaptive Card for Microsoft Teams.
+    """Legacy simplified report - redirects to project-wise format."""
+    # Convert old format to new project-wise format
+    projects_data = []
 
-    Returns a dict containing:
-      { "recipient": "user@email.com",
-        "recipient_name": "User Name",
-        "date": "2026-04-21",
-        "card": { <Adaptive Card JSON> } }
+    for p in summary.get("project_summary", []):
+        project_devs = []
+        for dev in developer_stats:
+            if p.get("project_name") in str(dev.get("projects", [])):
+                project_devs.append({
+                    "name": dev.get("name", dev.get("email", "Unknown")),
+                    "email": dev.get("email", ""),
+                    "branch": dev.get("current_branch", "develop"),
+                    "commits": dev.get("commits", 0),
+                    "issues": dev.get("issues", 0),
+                    "quality_score": dev.get("quality_score", 0),
+                    "productive_hours": dev.get("productive_hours", 0),
+                    "extra_hours": dev.get("extra_hours", 0),
+                })
 
-    For Power Automate:
-    - Use triggerBody()['recipient'] for the "Recipient" field (dynamic routing)
-    - Use triggerBody()['card'] for the "Adaptive Card" field (the actual card)
-    """
-    total_commits   = int(summary.get("total_commits", 0) or 0)
-    total_issues    = int(summary.get("total_issues", 0) or 0)
-    avg_quality     = summary.get("avg_quality", 0)
-    avg_effort      = int(summary.get("avg_effort", 0) or 0)
-    errors          = int(summary.get("total_errors", 0) or 0)
-    warnings        = int(summary.get("total_warnings", 0) or 0)
-    infos           = int(summary.get("total_infos", 0) or 0)
-
-    # Top 5 developers by commits
-    top_devs = sorted(
-        (developer_stats or []),
-        key=lambda d: (int(d.get("commits", 0) or 0)),
-        reverse=True,
-    )[:5]
-
-    # ── Build the developer table as a Container of rows ──
-    def _cell(text: str, weight: str = "Default", color: str = "Default") -> Dict[str, Any]:
-        return {
-            "type": "TextBlock",
-            "text": text,
-            "wrap": True,
-            "size": "Small",
-            "weight": weight,
-            "color": color,
-        }
-
-    header_row = {
-        "type": "ColumnSet",
-        "columns": [
-            {"type": "Column", "width": 3, "items": [_cell("Developer", "Bolder")]},
-            {"type": "Column", "width": 1, "items": [_cell("Commits", "Bolder")]},
-            {"type": "Column", "width": 1, "items": [_cell("Issues", "Bolder")]},
-            {"type": "Column", "width": 1, "items": [_cell("Quality", "Bolder")]},
-            {"type": "Column", "width": 1, "items": [_cell("Effort", "Bolder")]},
-        ],
-        "separator": True,
-    }
-    dev_rows = [header_row]
-    for dev in top_devs:
-        commits = int(dev.get("commits", 0) or 0)
-        issues = int(dev.get("issues", 0) or 0)
-        quality = dev.get("quality_score", 0)
-        effort = int(dev.get("effort_score", 0) or 0)
-        q_color = GOOD if (isinstance(quality, (int, float)) and quality >= 80) \
-            else (WARNING if (isinstance(quality, (int, float)) and quality >= 60) else ATTENTION)
-        dev_rows.append({
-            "type": "ColumnSet",
-            "spacing": "Small",
-            "columns": [
-                {"type": "Column", "width": 3, "items": [_cell(dev.get("name") or dev.get("email", "?"))]},
-                {"type": "Column", "width": 1, "items": [_cell(str(commits))]},
-                {"type": "Column", "width": 1, "items": [_cell(str(issues), color=ATTENTION if issues else "Default")]},
-                {"type": "Column", "width": 1, "items": [_cell(f"{quality}%", color=q_color)]},
-                {"type": "Column", "width": 1, "items": [_cell(str(effort))]},
-            ],
-        })
-    if not top_devs:
-        dev_rows.append({"type": "TextBlock", "text": "_No developer activity in this window._",
-                         "wrap": True, "size": "Small", "isSubtle": True})
-
-    # ── Per-project open-issue breakdown ──
-    proj_lines: List[Dict[str, Any]] = []
-    for p in (summary.get("project_summary") or [])[:10]:
-        branches = " · ".join(
-            f"{b.get('branch')}:{int(b.get('issues', 0) or 0)}{'*' if b.get('is_current') else ''}"
-            for b in (p.get("branches") or [])[:6]
-        )
-        proj_lines.append({
-            "type": "TextBlock",
-            "wrap": True,
-            "size": "Small",
-            "text": f"**{p.get('project_name')}** — current: `{p.get('current_branch', '?')}` — "
-                    f"deduped open: **{int(p.get('deduped_total', 0) or 0)}** — {branches}",
+        projects_data.append({
+            "project_name": p.get("project_name", "Unknown"),
+            "project_id": p.get("project_id", 0),
+            "branches": p.get("branches", []),
+            "developers": project_devs,
+            "total_commits": p.get("total_commits", 0),
+            "total_issues": p.get("deduped_total", 0),
         })
 
-    card = {
-        "type": "AdaptiveCard",
-        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-        "version": "1.4",
-        "msteams": {"width": "Full"},
-        "body": [
-            {
-                "type": "TextBlock",
-                "text": f"📊 Code Review Agent — Daily Report",
-                "weight": "Bolder",
-                "size": "Large",
-                "color": ACCENT_BLUE,
-            },
-            {
-                "type": "TextBlock",
-                "text": f"Hi {tl_name}, here's your team summary for **{date_label}**.",
-                "wrap": True,
-                "spacing": "Small",
-                "isSubtle": True,
-            },
-            {
-                "type": "FactSet",
-                "spacing": "Medium",
-                "facts": [
-                    {"title": "Commits",          "value": str(total_commits)},
-                    {"title": "Open Issues",      "value": f"{total_issues}  "
-                                                             f"(🔴 {errors}  🟡 {warnings}  🔵 {infos})"},
-                    {"title": "Avg Quality",      "value": f"{avg_quality}%"},
-                    {"title": "Total Effort",     "value": str(avg_effort)},
-                ],
-            },
-            {
-                "type": "TextBlock",
-                "text": "Top developers",
-                "weight": "Bolder",
-                "size": "Medium",
-                "spacing": "Large",
-            },
-            {"type": "Container", "items": dev_rows},
-        ],
-        "actions": [
-            {
-                "type": "Action.OpenUrl",
-                "title": "Open Dashboard",
-                "url": dashboard_url,
-            },
-        ],
-    }
-    if proj_lines:
-        card["body"].append({
-            "type": "TextBlock",
-            "text": "Projects",
-            "weight": "Bolder",
-            "size": "Medium",
-            "spacing": "Large",
-        })
-        card["body"].extend(proj_lines)
-
-    # Return both the raw Adaptive Card AND recipient info for Power Automate
-    # Power Automate can extract: triggerBody()['recipient'] for dynamic routing
-    # and triggerBody()['card'] for the actual Adaptive Card content
-    return {
-        "recipient": tl_email,
-        "recipient_name": tl_name,
-        "date": date_label,
-        "card": card,  # The actual Adaptive Card goes here
-    }
+    return build_project_wise_report(
+        projects_data=projects_data,
+        tl_name=tl_name,
+        tl_email=tl_email,
+        date_label=date_label,
+        report_type="daily",
+        dashboard_url=dashboard_url
+    )
 
 
 def post_to_teams(webhook_url: str, payload: Dict[str, Any], timeout: float = 15.0) -> Dict[str, Any]:
