@@ -469,17 +469,23 @@ class DatabaseManager:
             with self.connect() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     # Check for existing project with same normalized path
-                    cur.execute("SELECT id, path, project_key FROM projects WHERE is_active = TRUE")
+                    cur.execute("SELECT id, path, project_key, repo_url FROM projects WHERE is_active = TRUE")
                     for row in cur.fetchall():
                         existing_norm = (row["path"] or "").strip().rstrip("/").rstrip(".git").replace("\\", "/").lower()
                         if existing_norm == norm_path:
                             existing_key = row["project_key"] or ""
-                            # Back-fill project_key if missing on existing row
+                            updates = {}
                             if not existing_key:
                                 existing_key = _secrets.token_hex(8)
+                                updates["project_key"] = existing_key
+                            # Back-fill repo_url if newly provided
+                            if repo_url and not row.get("repo_url"):
+                                updates["repo_url"] = repo_url
+                            if updates:
+                                set_clause = ", ".join(f"{k} = %s" for k in updates)
                                 cur.execute(
-                                    "UPDATE projects SET project_key = %s WHERE id = %s",
-                                    (existing_key, row["id"]),
+                                    f"UPDATE projects SET {set_clause} WHERE id = %s",
+                                    (*updates.values(), row["id"]),
                                 )
                                 conn.commit()
                             return (row["id"], existing_key)
