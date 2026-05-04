@@ -338,9 +338,8 @@ def run_review(
                 api_key=config.get("ai_api_key"),
                 model=config.get("ai_model", "claude-haiku-4-5-20251001"),
             )
-            # AI review is advisory — it shows issues but does not block commits.
-            # Rule engine errors (block_on_error=true) are the gating signal.
-            _ = ai_code
+            if ai_code != 0:
+                final_code = 1
 
         blocked = result.has_blocking_issues(config.block_on_warning)
         if blocked:
