@@ -393,8 +393,10 @@ def _post_review_to_server(
         project_key     = cra_cfg.get("project_key", "").strip()
         developer_email = cra_cfg.get("developer_email", "").strip()
 
+        print(f"[CRA] Config loaded — project_key={'SET' if project_key else 'MISSING'}, email={'SET' if developer_email else 'MISSING'}")
         if not project_key or not developer_email:
-            return  # not configured — skip silently
+            print(f"[CRA] Skipping DB save — run 'cra install' in this project to link it.")
+            return
 
         # Categorize violations by type
         security_issues = 0
