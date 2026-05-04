@@ -126,6 +126,7 @@ class DatabaseManager:
                 for _migration in [
                     "ALTER TABLE projects ADD COLUMN IF NOT EXISTS project_key VARCHAR(64) UNIQUE",
                     "ALTER TABLE projects ADD COLUMN IF NOT EXISTS repo_url VARCHAR(500)",
+                    "ALTER TABLE project_scans ADD COLUMN IF NOT EXISTS violations_json JSONB DEFAULT '[]'::jsonb",
                 ]:
                     try:
                         cur.execute(_migration)
@@ -256,6 +257,7 @@ class DatabaseManager:
                         infos INTEGER DEFAULT 0,
                         files_with_issues JSONB DEFAULT '{}'::jsonb,
                         quality_score DECIMAL(5,2),
+                        violations_json JSONB DEFAULT '[]'::jsonb,
                         PRIMARY KEY (project_id, branch)
                     )
                 """)
@@ -740,14 +742,27 @@ class DatabaseManager:
                     bucket["infos"] += 1
                 bucket["total"] += 1
 
+            # Store full violation details (cap at 200 to keep payload manageable)
+            violations_to_store = [
+                {
+                    "severity": v.get("severity", "info"),
+                    "file": (v.get("file") or "").replace("\\", "/"),
+                    "line": v.get("line", 0),
+                    "rule_id": v.get("rule_id", ""),
+                    "category": v.get("category", ""),
+                    "message": v.get("message", ""),
+                }
+                for v in violations[:200]
+            ]
+
             with self.connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
                         INSERT INTO project_scans
                             (project_id, branch, scanned_at, scanned_by_email,
                              total_issues, errors, warnings, infos,
-                             files_with_issues, quality_score)
-                        VALUES (%s, %s, CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s, %s)
+                             files_with_issues, quality_score, violations_json)
+                        VALUES (%s, %s, CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (project_id, branch) DO UPDATE SET
                             scanned_at = EXCLUDED.scanned_at,
                             scanned_by_email = EXCLUDED.scanned_by_email,
@@ -756,10 +771,12 @@ class DatabaseManager:
                             warnings = EXCLUDED.warnings,
                             infos = EXCLUDED.infos,
                             files_with_issues = EXCLUDED.files_with_issues,
-                            quality_score = EXCLUDED.quality_score
+                            quality_score = EXCLUDED.quality_score,
+                            violations_json = EXCLUDED.violations_json
                     """, (project_id, branch, scanned_by_email,
                           len(violations), errors, warnings, infos,
-                          _json.dumps(files_with_issues), quality_score))
+                          _json.dumps(files_with_issues), quality_score,
+                          _json.dumps(violations_to_store)))
                     conn.commit()
                     return True
         except Exception as e:

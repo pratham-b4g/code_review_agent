@@ -1119,6 +1119,7 @@ class AnalyticsTracker:
                             'quality': (float(scan['quality_score']) if scan and scan.get('quality_score') is not None else None),
                             'scanned_at': (scan.get('scanned_at').isoformat() if scan and hasattr(scan.get('scanned_at'), 'isoformat')
                                             else (str(scan.get('scanned_at')) if scan else None)),
+                            'violations': (scan.get('violations_json') or []) if scan else [],
                         })
                         if attributed > dev_attributed_issues_max:
                             dev_attributed_issues_max = attributed
@@ -1351,52 +1352,23 @@ class AnalyticsTracker:
                         low_count = 0
                         issue_details = []
 
-                        # Check branch stats for detailed issue info
+                        # Build issue_details from actual violations stored in the scan
+                        _sev_map = {"error": "critical", "warning": "high", "info": "medium"}
                         for br_stat in dev.get('branch_stats', []):
                             if br_stat.get('project_name') == proj_name:
-                                # Map errors/warnings/infos to severity levels
-                                err_count = br_stat.get('errors', 0) or 0
-                                warn_count = br_stat.get('warnings', 0) or 0
-                                info_count = br_stat.get('infos', 0) or 0
-
-                                critical_count = err_count
-                                high_count = warn_count
-                                medium_count = min(info_count, 50)  # First 50 infos = medium
-                                low_count = max(0, info_count - 50)  # Rest = low
-
-                                # Get top files with issues from branch stats
-                                files_with_issues = br_stat.get('files_with_issues', {}) or {}
-                                top_files = sorted(files_with_issues.items(), 
-                                                   key=lambda x: x[1].get('total', 0) if isinstance(x[1], dict) else 0,
-                                                   reverse=True)[:3]
-                                file_list = [f[0] for f in top_files] if top_files else [f"{br_stat.get('branch', 'unknown')} branch"]
-                                file_display = ", ".join(file_list[:2]) if len(file_list) > 1 else file_list[0] if file_list else br_stat.get('branch', 'unknown')
-
-                                # Generate detailed issue information with explanations
-                                if err_count > 0:
+                                for v in (br_stat.get('violations') or []):
+                                    sev = v.get('severity', 'info')
                                     issue_details.append({
-                                        "title": "Critical Code Quality Issues",
-                                        "file": file_display,
-                                        "severity": "critical",
-                                        "explanation": f"Found {err_count} critical errors in {len(files_with_issues)} files that could cause crashes or security issues.",
-                                        "fix": "Fix syntax errors, undefined variables, and security vulnerabilities immediately. Check files: " + file_display
+                                        "title": v.get('rule_id') or v.get('category') or 'Issue',
+                                        "file": v.get('file', ''),
+                                        "line": v.get('line', 0),
+                                        "severity": _sev_map.get(sev, sev),
+                                        "explanation": v.get('message', ''),
+                                        "fix": f"Fix in {v.get('file', 'file')}:{v.get('line', '')}",
+                                        "category": v.get('category', ''),
                                     })
-                                if warn_count > 0:
-                                    issue_details.append({
-                                        "title": "High Priority Warnings",
-                                        "file": file_display,
-                                        "severity": "high",
-                                        "explanation": f"Found {warn_count} warnings indicating code smells and potential bugs in {len(files_with_issues)} files.",
-                                        "fix": "Refactor code to follow best practices. Review files: " + file_display
-                                    })
-                                if info_count > 0:
-                                    issue_details.append({
-                                        "title": "Code Style & Minor Issues",
-                                        "file": file_display,
-                                        "severity": "medium" if info_count <= 50 else "low",
-                                        "explanation": f"Found {info_count} style issues across {len(files_with_issues)} files.",
-                                        "fix": "Run code formatter on files: " + file_display
-                                    })
+                                # Cap at 30 per developer per project
+                                issue_details = issue_details[:30]
 
                         proj_developers.append({
                             "name": dev.get('name', dev.get('email', 'Unknown')),
