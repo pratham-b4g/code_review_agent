@@ -2239,26 +2239,19 @@ def run_dashboard(project_dir: Optional[str] = None, port: int = 9090,
     }
 
     if mode in ('admin', 'developer'):
-        # Multi-user mode - initialize database
+        # Multi-user mode - initialize database lazily on first request
         print(f"\n  Starting CRA Multi-User Dashboard")
         print(f"  Mode: {mode.upper()}")
-        print(f"  Initializing database...")
+        print(f"  Database: connecting on first request (Neon cold-start may take ~5s)")
 
-        try:
-            db = _get_db()
-            db.init_schema()
-            is_first = db.is_first_run()
-
-            if is_first:
-                print(f"\n  [FIRST RUN] Database initialized.")
-                print(f"  Open http://localhost:{port} to create Super Admin account.")
-            else:
-                user_count = len(db.get_all_users())
-                print(f"  [OK] Database ready ({user_count} users)")
-        except Exception as e:
-            print(f"\n  [WARNING] Database error: {e}")
-            print(f"  Make sure PostgreSQL is running and accessible.")
-            return 1
+        def _lazy_db_init():
+            try:
+                db = _get_db()
+                db.init_schema()
+            except Exception as e:
+                print(f"\n  [WARNING] Database init error: {e}")
+        import threading as _threading
+        _threading.Thread(target=_lazy_db_init, daemon=True).start()
     else:
         # Single-user mode - scan project
         if not project_dir:
