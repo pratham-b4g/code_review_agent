@@ -2015,13 +2015,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             try:
                 existing_scans = db.get_project_scans(project_id=project_id, branch=branch or 'main')
                 if existing_scans:
-                    ai_violations = [
-                        v for v in (existing_scans[0].get('violations_json') or [])
-                        if v.get('source') == 'ai'
-                    ]
+                    existing_json = existing_scans[0].get('violations_json') or []
+                    print(f"[Scan] Existing violations_json count: {len(existing_json)}")
+                    ai_violations = [v for v in existing_json if v.get('source') == 'ai']
+                    print(f"[Scan] AI violations found in DB: {len(ai_violations)}")
                     if ai_violations:
                         violations.extend(ai_violations)
                         print(f"[Scan] Merged {len(ai_violations)} AI violations from previous push")
+                else:
+                    print(f"[Scan] No existing scan record found for project_id={project_id} branch={branch or 'main'}")
             except Exception as e:
                 print(f"[Scan] Could not merge AI violations: {e}")
 

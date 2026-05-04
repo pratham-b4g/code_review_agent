@@ -750,8 +750,10 @@ class DatabaseManager:
                 bucket["total"] += 1
 
             # Store full violation details (cap at 200 to keep payload manageable)
+            # source field is preserved so admin re-scans can merge AI violations back in
             violations_to_store = [
                 {
+                    "source": v.get("source", "rules"),
                     "severity": _norm_sev(v.get("severity", "info")),
                     "file": (v.get("file") or "").replace("\\", "/"),
                     "line": v.get("line", 0),
