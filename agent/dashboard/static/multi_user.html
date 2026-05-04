@@ -898,10 +898,14 @@
                       <div>
                         <h3 class="font-semibold text-white text-sm">${p.name}</h3>
                         <p class="text-xs text-gray-500 mono mt-0.5 truncate max-w-md">${p.path}</p>
+                        ${p.repo_url
+                          ? `<p class="text-[10px] text-accent-green mono mt-0.5 truncate max-w-md" title="${p.repo_url}">&#128279; ${p.repo_url}</p>`
+                          : `<p class="text-[10px] text-yellow-600 mt-0.5">&#9888; No GitHub URL — <button onclick="editRepoUrl(${p.id},'')" class="underline hover:text-yellow-400">Set URL</button></p>`}
                         <p class="text-[10px] text-gray-600 mt-1">Branch: ${p.main_branch}</p>
                       </div>
                     </div>
                     <div class="flex gap-1.5 shrink-0">
+                      <button onclick="editRepoUrl(${p.id},'${(p.repo_url||'').replace(/'/g,"\\'")}')" class="btn px-2.5 py-1.5 text-xs bg-white/5 text-gray-300 rounded-lg hover:bg-white/10 border border-border-subtle" title="Edit GitHub URL">URL</button>
                       <button onclick="viewProject(${p.id})" class="btn px-2.5 py-1.5 text-xs bg-white/5 text-gray-300 rounded-lg hover:bg-white/10 border border-border-subtle">Details</button>
                       <button onclick="assignUsers(${p.id})" class="btn px-2.5 py-1.5 text-xs bg-accent-purple/10 text-accent-purple rounded-lg hover:bg-accent-purple/20 border border-accent-purple/20">Assign</button>
                       <button onclick="openProjectReview(${p.id}, '${p.path.replace(/'/g, "\\'")}')" class="btn px-2.5 py-1.5 text-xs gradient-blue text-white rounded-lg hover:opacity-90">Review</button>
@@ -1890,6 +1894,25 @@
     }
 
     // ── View Project Details ────────────────────────────────────
+    async function editRepoUrl(projectId, currentUrl) {
+      const newUrl = window.prompt('Enter GitHub repo URL (e.g. https://github.com/org/repo.git):', currentUrl || '');
+      if (newUrl === null) return; // cancelled
+      try {
+        const res = await fetch(`/api/projects/${projectId}/repo-url`, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({repo_url: newUrl.trim()})
+        });
+        const data = await res.json();
+        if (data.success) {
+          showNotification('GitHub URL saved', 'success');
+          loadView('projects');
+        } else {
+          showNotification(data.error || 'Failed to save URL', 'error');
+        }
+      } catch (e) { showNotification('Error: ' + e.message, 'error'); }
+    }
+
     async function viewProject(projectId) {
       try {
         const res = await fetch(`/api/projects?t=${Date.now()}`);

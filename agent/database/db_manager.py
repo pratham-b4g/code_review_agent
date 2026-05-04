@@ -555,6 +555,21 @@ class DatabaseManager:
             print(f"[DB Error] update_project_main_branch: {e}")
             return False
 
+    def update_project_repo_url(self, project_id: int, repo_url: str) -> bool:
+        """Set or update the GitHub URL for a project."""
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE projects SET repo_url = %s WHERE id = %s",
+                        (repo_url or None, project_id),
+                    )
+                    conn.commit()
+                    return cur.rowcount > 0
+        except Exception as e:
+            print(f"[DB Error] update_project_repo_url: {e}")
+            return False
+
     def get_user_projects(self, user_email: str) -> List[Dict[str, Any]]:
         """Get projects assigned to a user."""
         with self.connect() as conn:

@@ -991,6 +991,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         return super().do_GET()
 
+    def do_PUT(self):
+        """Route PUT requests through the same handler as POST."""
+        self.do_POST()
+
     def do_POST(self):
         """Handle POST requests for multi-user operations."""
         global _current_user
@@ -1281,6 +1285,25 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         return
                 ok = db.update_project_main_branch(project_id, new_branch)
                 self._json_response({"success": ok, "main_branch": new_branch})
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # Update a project's GitHub repo URL (super_admin only)
+        if path.startswith("/api/projects/") and path.endswith("/repo-url"):
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            if _current_user.get("role") not in ("super_admin", "admin"):
+                self._json_response({"error": "Forbidden"}, 403)
+                return
+            try:
+                project_id = int(path.split("/")[3])
+                repo_url = (data.get("repo_url") or "").strip()
+                db = _get_db()
+                ok = db.update_project_repo_url(project_id, repo_url)
+                _cache_set("GET:/api/projects", None, ttl=0)
+                self._json_response({"success": ok, "repo_url": repo_url})
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
             return
