@@ -288,7 +288,20 @@ def prompt_tl_setup() -> None:
         project_name = input("  Project name                                          : ").strip()
         tl_name      = input("  Your name (TL)                                        : ").strip()
         tl_email     = input("  Your email (TL)                                       : ").strip()
-        repo_url     = input("  GitHub repo URL (e.g. https://github.com/org/repo)   : ").strip() or None
+        # Auto-detect GitHub URL from git remote
+        _detected_url = ""
+        try:
+            import subprocess as _sp
+            _r = _sp.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True)
+            if _r.returncode == 0:
+                _detected_url = _r.stdout.strip()
+        except Exception:
+            pass
+        if _detected_url:
+            print(f"  GitHub repo URL (detected)                            : {_detected_url}")
+            repo_url = _detected_url
+        else:
+            repo_url = input("  GitHub repo URL (e.g. https://github.com/org/repo)   : ").strip() or None
     except KeyboardInterrupt:
         print("\n[WARNING] Cancelled.")
         return
