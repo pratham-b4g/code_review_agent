@@ -297,16 +297,46 @@ def prompt_tl_setup() -> None:
         return
 
     try:
-        from agent.local_store import save_project
-        project_key = save_project(
-            name=project_name,
-            tl_name=tl_name,
-            tl_email=tl_email,
-        )
-
         import json as _json
         from agent.git.git_utils import get_repo_root
         repo_root = get_repo_root() or os.getcwd()
+
+        # Step 1: Register in PostgreSQL first so project_key is globally unique
+        project_key = ""
+        db_registered = False
+        try:
+            from agent.database.db_manager import DatabaseManager
+            db = DatabaseManager()
+            # Ensure TL user exists in DB (upsert by email)
+            db.create_user(tl_email, tl_name, "admin", 0)
+            tl_user = db.get_user_by_email(tl_email)
+            created_by = tl_user["id"] if tl_user else 0
+            project_id, project_key = db.create_project(
+                project_name, repo_root, "main", created_by
+            )
+            # Auto-assign TL to the project
+            if project_id:
+                db.assign_user_to_project(project_id, tl_email, "tl", created_by)
+            db_registered = True
+            print(f"[OK] Project registered in database (id={project_id})")
+        except Exception as db_err:
+            print(f"[WARNING] Could not connect to database — saving locally only: {db_err}")
+
+        # Step 2: Fall back to local key if DB was unreachable
+        from agent.local_store import save_project
+        if project_key:
+            # Import with the DB-generated key so both systems share the same key
+            from agent.local_store import save_project_from_config
+            save_project_from_config({
+                "project_key": project_key,
+                "name": project_name,
+                "tl_name": tl_name,
+                "tl_email": tl_email,
+            })
+        else:
+            project_key = save_project(name=project_name, tl_name=tl_name, tl_email=tl_email)
+
+        # Step 3: Write cra-project.json into the repo root
         config_file = Path(repo_root) / "cra-project.json"
         config_data = {
             "project_key": project_key,
@@ -316,17 +346,31 @@ def prompt_tl_setup() -> None:
         }
         config_file.write_text(_json.dumps(config_data, indent=2), encoding="utf-8")
 
+        # Step 4: Save TL identity to ~/.cra/config.json
+        _save_cra_config({
+            "developer_name": tl_name,
+            "developer_email": tl_email,
+        })
+
+        # Step 5: Save project key to .git/cra_project_key so the hook can find it
+        _save_repo_project_key(repo_root, project_key)
+
+        # Step 6: Install git hook + ask for API key (skip dev registration — TL already registered above)
+        print("\n[SETUP] Installing git pre-commit hook...")
+        install_hook(repo_root=repo_root, force=False, skip_developer_setup=True)
+
         print("\n" + "=" * 50)
         print(f"  Project created : {project_name}")
         print(f"  Project Key     : {project_key}")
-        print(f"  Config file     : cra-project.json  (commit this to your repo)")
+        print(f"  DB registered   : {'Yes' if db_registered else 'No (offline mode)'}")
+        print(f"  Config file     : cra-project.json")
+        print(f"  Hook installed  : Yes")
         print("=" * 50)
         print("\n  Next steps:")
         print("  1. Commit cra-project.json to the repo")
-        print("  2. Developers run  cra install  — config is read automatically")
-        print("  3. Every machine will send its own daily report to the TL at 6:30 PM IST\n")
+        print("  2. Developers run  cra install  in the same repo\n")
     except Exception as e:
-        print(f"[ERROR] Could not save project locally: {e}")
+        print(f"[ERROR] Could not save project: {e}")
 
 
 def _ask_name_email() -> tuple:
@@ -359,12 +403,13 @@ exit $STATUS
 """
 
 
-def install_hook(repo_root: Optional[str] = None, force: bool = False) -> bool:
+def install_hook(repo_root: Optional[str] = None, force: bool = False, skip_developer_setup: bool = False) -> bool:
     """Install the pre-commit hook into the git repository.
 
     Args:
         repo_root: Path to the git repository root. Defaults to CWD.
         force: Overwrite an existing hook without prompting.
+        skip_developer_setup: Skip the developer registration prompt (used by cra setup).
 
     Returns:
         True if installation succeeded.
@@ -410,7 +455,8 @@ def install_hook(repo_root: Optional[str] = None, force: bool = False) -> bool:
     _prompt_api_key()
 
     # Register developer on CRA server (pass repo_root so project key is saved per-repo)
-    _prompt_developer_setup(repo_root=str(root))
+    if not skip_developer_setup:
+        _prompt_developer_setup(repo_root=str(root))
 
     return True
 

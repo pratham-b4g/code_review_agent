@@ -560,6 +560,55 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
+        # Download cra-project.json for a project (admin/super_admin only)
+        if path.startswith("/api/projects/") and path.endswith("/cra-config"):
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401)
+                return
+            if _current_user.get("role") not in ("super_admin", "admin"):
+                self._json_response({"error": "Forbidden"}, 403)
+                return
+            try:
+                project_id = int(path.split("/")[3])
+                db = _get_db()
+                projects = db.get_all_projects()
+                project = next((p for p in projects if p["id"] == project_id), None)
+                if not project:
+                    self._json_response({"error": "Project not found"}, 404)
+                    return
+                project_key = project.get("project_key") or ""
+                # Back-fill key if missing (old project created before this feature)
+                if not project_key:
+                    import secrets as _secrets
+                    project_key = _secrets.token_hex(8)
+                    with db.connect() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE projects SET project_key = %s WHERE id = %s",
+                                (project_key, project_id),
+                            )
+                        conn.commit()
+                tl_user = _current_user
+                config_data = {
+                    "project_key": project_key,
+                    "name": project.get("name", ""),
+                    "tl_name": tl_user.get("name", ""),
+                    "tl_email": tl_user.get("email", ""),
+                }
+                config_json = json.dumps(config_data, indent=2)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="cra-project.json"',
+                )
+                self.send_header("Content-Length", str(len(config_json.encode())))
+                self.end_headers()
+                self.wfile.write(config_json.encode())
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
         # Get user's project assignments (authenticated, super admin/admin or self only)
         if path == "/api/user-project-assignments":
             if not _current_user:
@@ -1160,7 +1209,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 requested_branch = (data.get("main_branch") or "").strip()
                 if not requested_branch:
                     requested_branch = _detect_default_branch(data.get("path")) or "main"
-                project_id = db.create_project(
+                project_id, project_key = db.create_project(
                     data.get("name"),
                     data.get("path"),
                     requested_branch,
@@ -1169,6 +1218,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({
                     "success": project_id is not None,
                     "project_id": project_id,
+                    "project_key": project_key,
                     "already_existed": pre_existing is not None,
                     "existing_project": pre_existing
                 })
@@ -2168,13 +2218,13 @@ def run_dashboard(project_dir: Optional[str] = None, port: int = 9090,
             is_first = db.is_first_run()
 
             if is_first:
-                print(f"\n  🎉 First run! Database initialized.")
+                print(f"\n  [FIRST RUN] Database initialized.")
                 print(f"  Open http://localhost:{port} to create Super Admin account.")
             else:
                 user_count = len(db.get_all_users())
-                print(f"  ✓ Database ready ({user_count} users)")
+                print(f"  [OK] Database ready ({user_count} users)")
         except Exception as e:
-            print(f"\n  ⚠️ Database error: {e}")
+            print(f"\n  [WARNING] Database error: {e}")
             print(f"  Make sure PostgreSQL is running and accessible.")
             return 1
     else:

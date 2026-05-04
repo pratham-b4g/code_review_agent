@@ -116,9 +116,19 @@ class DatabaseManager:
                         main_branch VARCHAR(100) DEFAULT 'main',
                         created_by INTEGER REFERENCES users(id),
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        is_active BOOLEAN DEFAULT TRUE
+                        is_active BOOLEAN DEFAULT TRUE,
+                        project_key VARCHAR(64) UNIQUE
                     )
                 """)
+
+                # Migration: add project_key to existing installs
+                try:
+                    cur.execute("""
+                        ALTER TABLE projects
+                        ADD COLUMN IF NOT EXISTS project_key VARCHAR(64) UNIQUE
+                    """)
+                except Exception:
+                    pass
 
                 # Project assignments (TLs and Developers assigned to projects)
                 cur.execute("""
@@ -436,32 +446,62 @@ class DatabaseManager:
             print(f"[DB Error] get_tls_with_schedules: {e}")
             return []
 
-    def create_project(self, name: str, path: str, main_branch: str, created_by: int) -> Optional[int]:
-        """Create a new project. If a project with the same path already exists
-        (case-insensitive, normalized), return the existing project's id instead
-        of creating a duplicate."""
+    def create_project(self, name: str, path: str, main_branch: str, created_by: int) -> tuple:
+        """Create a new project. Returns (project_id, project_key).
+
+        If a project with the same path already exists (case-insensitive,
+        normalized), returns its existing id and project_key instead of
+        creating a duplicate.
+        """
+        import secrets as _secrets
         try:
-            # Normalize the path for duplicate checking
             norm_path = (path or "").strip().rstrip("/").rstrip(".git").replace("\\", "/").lower()
             with self.connect() as conn:
-                with conn.cursor() as cur:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     # Check for existing project with same normalized path
-                    cur.execute("SELECT id, path FROM projects WHERE is_active = TRUE")
+                    cur.execute("SELECT id, path, project_key FROM projects WHERE is_active = TRUE")
                     for row in cur.fetchall():
-                        existing_norm = (row[1] or "").strip().rstrip("/").rstrip(".git").replace("\\", "/").lower()
+                        existing_norm = (row["path"] or "").strip().rstrip("/").rstrip(".git").replace("\\", "/").lower()
                         if existing_norm == norm_path:
-                            return row[0]  # Return existing id, don't create duplicate
-                    # No duplicate — create new
+                            existing_key = row["project_key"] or ""
+                            # Back-fill project_key if missing on existing row
+                            if not existing_key:
+                                existing_key = _secrets.token_hex(8)
+                                cur.execute(
+                                    "UPDATE projects SET project_key = %s WHERE id = %s",
+                                    (existing_key, row["id"]),
+                                )
+                                conn.commit()
+                            return (row["id"], existing_key)
+                    # No duplicate — create new with a fresh project_key
+                    new_key = _secrets.token_hex(8)
                     cur.execute("""
-                        INSERT INTO projects (name, path, main_branch, created_by)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO projects (name, path, main_branch, created_by, project_key)
+                        VALUES (%s, %s, %s, %s, %s)
                         RETURNING id
-                    """, (name, path, main_branch, created_by))
+                    """, (name, path, main_branch, created_by, new_key))
                     result = cur.fetchone()
                     conn.commit()
-                    return result[0] if result else None
+                    return (result["id"], new_key) if result else (None, new_key)
         except Exception as e:
             print(f"[DB Error] create_project: {e}")
+            return (None, "")
+
+    def get_project_by_key(self, project_key: str) -> Optional[Dict[str, Any]]:
+        """Look up a project by its project_key (used by the git hook)."""
+        if not project_key:
+            return None
+        try:
+            with self.connect() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        "SELECT * FROM projects WHERE project_key = %s AND is_active = TRUE",
+                        (project_key,),
+                    )
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+        except Exception as e:
+            print(f"[DB Error] get_project_by_key: {e}")
             return None
 
     def get_all_projects(self) -> List[Dict[str, Any]]:

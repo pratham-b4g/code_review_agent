@@ -484,18 +484,26 @@ def track_push_analytics():
         if commit_count == 0:
             return
         
-        # Initialize DB and find project
+        # Initialize DB and find project by project_key (canonical lookup)
         db = DatabaseManager()
-        
-        # Try to find project by repo path or remote URL
-        projects = db.get_all_projects()
+
+        from agent.git.hook_installer import load_cra_config
+        cra_cfg = load_cra_config(repo_root=repo_path)
+        project_key = cra_cfg.get("project_key", "").strip()
+
         project_id = None
-        
-        for p in projects:
-            if repo_path in p.get('path', '') or p.get('path', '') in repo_path:
-                project_id = p['id']
-                break
-        
+        if project_key:
+            project = db.get_project_by_key(project_key)
+            if project:
+                project_id = project["id"]
+
+        # Fallback: path matching for repos not yet using project_key
+        if not project_id:
+            for p in db.get_all_projects():
+                if repo_path in p.get("path", "") or p.get("path", "") in repo_path:
+                    project_id = p["id"]
+                    break
+
         if not project_id:
             return  # Project not registered in dashboard
         

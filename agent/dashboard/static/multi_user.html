@@ -1892,7 +1892,24 @@
           <div class="space-y-2 mb-5 text-sm">
             <div class="flex justify-between p-2 bg-bg-dark rounded-lg"><span class="text-gray-400">Main Branch</span><span class="text-white">${project.main_branch}</span></div>
             <div class="flex justify-between p-2 bg-bg-dark rounded-lg"><span class="text-gray-400">Created</span><span class="text-white text-xs">${new Date(project.created_at).toLocaleString()}</span></div>
+            <div class="flex justify-between items-center p-2 bg-bg-dark rounded-lg gap-2">
+              <span class="text-gray-400 shrink-0">Project Key</span>
+              <div class="flex items-center gap-1.5 min-w-0">
+                <span class="text-accent-blue mono text-xs truncate" id="pkDisplay_${project.id}">${project.project_key || '(not set)'}</span>
+                ${project.project_key ? `<button onclick="navigator.clipboard.writeText('${project.project_key}').then(()=>showNotification('Project key copied!','success'))" class="btn shrink-0 px-2 py-1 text-[10px] bg-accent-blue/10 text-accent-blue rounded hover:bg-accent-blue/20 border border-accent-blue/20">Copy</button>` : ''}
+              </div>
+            </div>
           </div>
+          ${project.project_key ? `
+          <div class="p-3 bg-accent-blue/5 border border-accent-blue/20 rounded-lg mb-4 text-xs text-gray-400">
+            <p class="font-semibold text-accent-blue mb-1">Setup Instructions for Developers</p>
+            <p>1. Download <code class="text-white">cra-project.json</code> below and commit it to the repo root</p>
+            <p class="mt-0.5">2. Developers run <code class="text-white">cra install</code> — config is auto-detected</p>
+          </div>
+          <a href="/api/projects/${project.id}/cra-config" download="cra-project.json" class="btn flex items-center justify-center gap-2 w-full gradient-blue text-white py-2.5 rounded-lg hover:opacity-90 text-sm shadow mb-2">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+            Download cra-project.json
+          </a>` : ''}
           <button onclick="closeModal('viewProjectModal')" class="btn w-full bg-white/5 text-gray-300 py-2.5 rounded-lg hover:bg-white/10 text-sm border border-border-subtle">Close</button>
         `);
       } catch (e) { showNotification('Error: ' + e.message, 'error'); }
