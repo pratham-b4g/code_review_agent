@@ -315,19 +315,27 @@ class DatabaseManager:
             print(f"[DB Error] get_user_by_email: {e}")
             return None
 
-    def create_user(self, email: str, name: str, role: str, created_by: int) -> bool:
+    def create_user(self, email: str, name: str, role: str, created_by: Optional[int] = None) -> bool:
         """Create a new user (TL or Developer)."""
         try:
             with self.connect() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("""
-                        INSERT INTO users (email, name, role, created_by)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (email) DO NOTHING
-                    """, (email, name, role, created_by))
+                    if created_by:
+                        cur.execute("""
+                            INSERT INTO users (email, name, role, created_by)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (email) DO NOTHING
+                        """, (email, name, role, created_by))
+                    else:
+                        cur.execute("""
+                            INSERT INTO users (email, name, role)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT (email) DO NOTHING
+                        """, (email, name, role))
                     conn.commit()
                     return True
-        except Exception:
+        except Exception as e:
+            print(f"[DB Error] create_user: {e}")
             return False
 
     def get_all_users(self, role: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -475,11 +483,18 @@ class DatabaseManager:
                             return (row["id"], existing_key)
                     # No duplicate — create new with a fresh project_key
                     new_key = _secrets.token_hex(8)
-                    cur.execute("""
-                        INSERT INTO projects (name, path, main_branch, created_by, project_key)
-                        VALUES (%s, %s, %s, %s, %s)
-                        RETURNING id
-                    """, (name, path, main_branch, created_by, new_key))
+                    if created_by:
+                        cur.execute("""
+                            INSERT INTO projects (name, path, main_branch, created_by, project_key)
+                            VALUES (%s, %s, %s, %s, %s)
+                            RETURNING id
+                        """, (name, path, main_branch, created_by, new_key))
+                    else:
+                        cur.execute("""
+                            INSERT INTO projects (name, path, main_branch, project_key)
+                            VALUES (%s, %s, %s, %s)
+                            RETURNING id
+                        """, (name, path, main_branch, new_key))
                     result = cur.fetchone()
                     conn.commit()
                     return (result["id"], new_key) if result else (None, new_key)
