@@ -127,6 +127,7 @@ class DatabaseManager:
                     "ALTER TABLE projects ADD COLUMN IF NOT EXISTS project_key VARCHAR(64) UNIQUE",
                     "ALTER TABLE projects ADD COLUMN IF NOT EXISTS repo_url VARCHAR(500)",
                     "ALTER TABLE project_scans ADD COLUMN IF NOT EXISTS violations_json JSONB DEFAULT '[]'::jsonb",
+                    "ALTER TABLE project_scans ADD COLUMN IF NOT EXISTS ai_violations_json JSONB DEFAULT '[]'::jsonb",
                 ]:
                     try:
                         cur.execute(_migration)
@@ -258,6 +259,7 @@ class DatabaseManager:
                         files_with_issues JSONB DEFAULT '{}'::jsonb,
                         quality_score DECIMAL(5,2),
                         violations_json JSONB DEFAULT '[]'::jsonb,
+                        ai_violations_json JSONB DEFAULT '[]'::jsonb,
                         PRIMARY KEY (project_id, branch)
                     )
                 """)
@@ -790,6 +792,58 @@ class DatabaseManager:
                     return True
         except Exception as e:
             print(f"[DB Error] save_project_scan: {e}")
+            return False
+
+    def save_ai_violations(self, project_id: int, branch: str, ai_violations: List[Dict[str, Any]]) -> bool:
+        """Accumulate AI violations into ai_violations_json without touching rule violations.
+
+        Merges with existing AI violations (dedup by file+message[:80]) so
+        multiple subproject hook runs don't lose each other's results.
+        Ensures the project_scans row exists first (upserts a blank row if needed).
+        """
+        try:
+            import json as _json
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    # Ensure row exists
+                    cur.execute("""
+                        INSERT INTO project_scans (project_id, branch)
+                        VALUES (%s, %s)
+                        ON CONFLICT (project_id, branch) DO NOTHING
+                    """, (project_id, branch))
+
+                    # Load existing AI violations
+                    cur.execute(
+                        "SELECT ai_violations_json FROM project_scans WHERE project_id=%s AND branch=%s",
+                        (project_id, branch)
+                    )
+                    row = cur.fetchone()
+                    existing = []
+                    if row and row[0]:
+                        try:
+                            existing = _json.loads(row[0]) if isinstance(row[0], str) else (row[0] or [])
+                        except Exception:
+                            existing = []
+
+                    # Dedup: (file, message[:80]) as key
+                    seen = {(v.get("file", ""), v.get("message", "")[:80]) for v in existing}
+                    for v in ai_violations:
+                        key = (v.get("file", ""), v.get("message", "")[:80])
+                        if key not in seen:
+                            existing.append(v)
+                            seen.add(key)
+
+                    # Cap at 100 AI violations total
+                    merged = existing[:100]
+
+                    cur.execute(
+                        "UPDATE project_scans SET ai_violations_json=%s WHERE project_id=%s AND branch=%s",
+                        (_json.dumps(merged), project_id, branch)
+                    )
+                    conn.commit()
+                    return True
+        except Exception as e:
+            print(f"[DB Error] save_ai_violations: {e}")
             return False
 
     def get_project_scans(self, project_id: Optional[int] = None,

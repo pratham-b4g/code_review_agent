@@ -509,12 +509,13 @@ def _save_scan_to_postgres(
                 "category": v.category,
             })
 
-        ai_count = 0
+        # Separate AI violations into dedicated column (accumulated, never overwritten)
+        ai_violations = []
         for issue in critical_issues:
             if issue.get("source") != "ai":
                 continue
             raw_sev = issue.get("severity", "medium")
-            violations.append({
+            ai_violations.append({
                 "source": "ai",
                 "file": (issue.get("file") or "").replace("\\", "/"),
                 "line": issue.get("line") or 0,
@@ -523,15 +524,15 @@ def _save_scan_to_postgres(
                 "rule_id": issue.get("category") or "AI",
                 "category": issue.get("category", ""),
             })
-            ai_count += 1
 
-        print(f"[CRA] Saving {len(result.violations)} rule violations + {ai_count} AI violations to DB")
+        print(f"[CRA] Saving {len(violations)} rule violations + {len(ai_violations)} AI violations to DB")
 
         errors = len([v for v in violations if v["severity"] == "error"])
         warnings = len([v for v in violations if v["severity"] == "warning"])
         total = len(violations)
         quality_score = max(0.0, 100.0 - errors * 5 - warnings * 2)
 
+        # Save rule violations (overwrites per subproject run — that's fine)
         db.save_project_scan(
             project_id=project_id,
             branch=branch,
@@ -539,7 +540,11 @@ def _save_scan_to_postgres(
             violations=violations,
             quality_score=quality_score,
         )
-        print(f"[CRA] Saved to PostgreSQL: {total} violations ({errors} errors, {warnings} warnings)")
+        # Accumulate AI violations separately — never lost across subprojects or admin rescans
+        if ai_violations:
+            db.save_ai_violations(project_id=project_id, branch=branch, ai_violations=ai_violations)
+
+        print(f"[CRA] Saved to PostgreSQL: {total} rule + {len(ai_violations)} AI violations")
     except Exception as _e:
         print(f"[CRA] PostgreSQL save failed (non-blocking): {_e}")
 
