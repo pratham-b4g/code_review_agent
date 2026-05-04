@@ -300,6 +300,16 @@
     let allTLs = [];
     let launchContext = null; // {project_dir, branch, repo_url} set when opened from a project dir
 
+    // Auto-inject auth token into all /api/ requests
+    const _origFetch = window.fetch.bind(window);
+    window.fetch = (url, options = {}) => {
+      const token = localStorage.getItem('cra_auth_token');
+      if (token && typeof url === 'string' && url.startsWith('/api/')) {
+        options = { ...options, headers: { ...(options.headers || {}), 'X-Auth-Token': token } };
+      }
+      return _origFetch(url, options);
+    };
+
     // ── Utility: Avatar ──────────────────────────────────────────
     function getInitials(name) {
       if (!name) return '?';
@@ -359,6 +369,7 @@
         });
         const data = await res.json();
         if (data.success) {
+          if (data.token) localStorage.setItem('cra_auth_token', data.token);
           currentUser = data.user;
           currentRole = data.user.role;
           closeLoginModal();
@@ -385,6 +396,7 @@
         });
         const data = await res.json();
         if (data.success) {
+          if (data.token) localStorage.setItem('cra_auth_token', data.token);
           currentUser = data.user;
           currentRole = 'super_admin';
           closeLoginModal();
@@ -466,7 +478,12 @@
 
     // ── Login Helpers ───────────────────────────────────────────
     function closeLoginModal() { document.getElementById('loginModal').classList.add('hidden'); }
-    function logout() { currentUser = null; currentRole = null; location.reload(); }
+    function logout() {
+      fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+      localStorage.removeItem('cra_auth_token');
+      currentUser = null; currentRole = null;
+      location.reload();
+    }
 
     // ── Initialize Dashboard ────────────────────────────────────
     async function initDashboard() {
@@ -2738,6 +2755,26 @@
     }
 
     initLogin();
+
+    // ── Session Restore on Page Load ─────────────────────────────
+    document.addEventListener('DOMContentLoaded', async () => {
+      const token = localStorage.getItem('cra_auth_token');
+      if (token) {
+        try {
+          const res = await _origFetch('/api/auth/me', { headers: { 'X-Auth-Token': token } });
+          const data = await res.json();
+          if (data.success && data.user) {
+            currentUser = data.user;
+            currentRole = data.user.role;
+            document.getElementById('loginModal').classList.add('hidden');
+            initDashboard();
+            return;
+          }
+        } catch (e) {}
+        localStorage.removeItem('cra_auth_token');
+      }
+      document.getElementById('loginModal').classList.remove('hidden');
+    });
   </script>
 </body>
 </html>

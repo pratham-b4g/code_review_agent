@@ -24,6 +24,8 @@ _STATIC_DIR = Path(__file__).parent / "static"
 # Multi-user mode flag and current user
 _mode: str = "developer"  # 'admin' or 'developer'
 _current_user: Optional[Dict[str, Any]] = None
+import secrets as _secrets_mod
+_ACTIVE_TOKENS: Dict[str, Dict] = {}
 
 # Launch context: set when dashboard is opened from a project directory
 _launch_context: Dict[str, Any] = {}  # {project_dir, branch, repo_url}
@@ -98,6 +100,14 @@ def _cache_set(key: str, value: Any, ttl: float = None):
     ttl = ttl if ttl is not None else _CACHE_DEFAULT_TTL
     with _CACHE_LOCK:
         _CACHE[key] = (value, time.monotonic() + ttl)
+
+
+def _resolve_request_user(handler) -> Optional[Dict[str, Any]]:
+    """Resolve the authenticated user for this specific request via X-Auth-Token header."""
+    token = handler.headers.get("X-Auth-Token", "")
+    if token:
+        return _ACTIVE_TOKENS.get(token)
+    return None
 
 
 def _cache_invalidate(prefix: str = ""):
@@ -258,6 +268,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(_STATIC_DIR), **kwargs)
 
     def do_GET(self):
+        _current_user = _resolve_request_user(self)
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -350,6 +361,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
 
         # ── Multi-User API Endpoints ────────────────────────────────────────
+
+        if path == "/api/auth/me":
+            user = _resolve_request_user(self)
+            if user:
+                self._json_response({"success": True, "user": user})
+            else:
+                self._json_response({"success": False, "error": "Not authenticated"}, 401)
+            return
 
         # Check first run
         if path == "/api/auth/first-run":
@@ -1022,8 +1041,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                                 if create_success:
                                     user = db.get_user_by_email(SUPER_ADMIN_EMAIL)
                             if user:
-                                _current_user = user
-                                self._json_response({"success": True, "user": user})
+                                _token = _secrets_mod.token_hex(32)
+                                _ACTIVE_TOKENS[_token] = user
+                                _current_user = user  # keep global for backward compat
+                                self._json_response({"success": True, "user": user, "token": _token})
                             else:
                                 self._json_response({"error": "Failed to create/get super admin user"}, 500)
                         except Exception as db_error:
@@ -1037,8 +1058,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     try:
                         user = db.get_user_by_email(data.get("email"))
                         if user:
-                            _current_user = user
-                            self._json_response({"success": True, "user": user})
+                            _token = _secrets_mod.token_hex(32)
+                            _ACTIVE_TOKENS[_token] = user
+                            _current_user = user  # keep global for backward compat
+                            self._json_response({"success": True, "user": user, "token": _token})
                         else:
                             # Check if there are any TLs they can request from
                             tls = db.get_all_users(role='admin')
@@ -1049,6 +1072,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 print(f"[Login Error] General error: {e}")
                 self._json_response({"error": str(e)}, 500)
+            return
+
+        if path == "/api/auth/logout":
+            token = self.headers.get("X-Auth-Token", "")
+            if token and token in _ACTIVE_TOKENS:
+                del _ACTIVE_TOKENS[token]
+            self._json_response({"success": True})
             return
 
         # Create access request (optionally for a specific project)
