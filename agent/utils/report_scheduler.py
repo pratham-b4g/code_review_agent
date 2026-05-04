@@ -115,7 +115,7 @@ def _send_report_for(db, tracker, teams_mod, email_mod, tl: dict,
     elif frequency == "monthly":
         days = 30
     else:
-        days = 1
+        days = 7  # daily report shows last 7 days so there's always data
     
     # Get project-wise summary with severity breakdown and productivity metrics
     projects_data = tracker.get_project_wise_summary(
@@ -187,7 +187,7 @@ def _tick(get_db, dashboard_url: str) -> None:
         return
     try:
         db = get_db()
-        tracker = get_tracker(db)
+        tracker = get_tracker()
         email_notifier = get_email_notifier()
     except Exception as e:
         print(f"[Scheduler] could not acquire DB/tracker: {e}")

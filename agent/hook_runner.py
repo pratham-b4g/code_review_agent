@@ -327,6 +327,13 @@ def run_review(
                 f"\n     Open it in your editor to review and fix issues one by one.\n"
             )
 
+        # Auto-enable AI when an API key is available in the environment,
+        # even if --ai wasn't passed explicitly (e.g. running from git hook).
+        _ai_keys = ["GROQ_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+        if not ai_review and any(os.environ.get(k) for k in _ai_keys):
+            ai_review = True
+            print("[CRA] API key detected — AI review enabled automatically.")
+
         ai_issues: list = []
         if ai_review:
             from agent.ai.ai_reviewer import run_ai_review
