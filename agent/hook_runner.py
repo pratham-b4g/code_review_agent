@@ -468,9 +468,11 @@ def _save_scan_to_postgres(
         import subprocess as _sp
         from agent.database import DatabaseManager
 
+        print(f"[CRA] Saving scan to PostgreSQL (project_key={project_key}, email={developer_email})")
         db = DatabaseManager()
         project = db.get_project_by_key(project_key)
         if not project:
+            print(f"[CRA] Project not found in DB for key={project_key} — skipping PostgreSQL save")
             return
 
         project_id = project["id"]
@@ -484,6 +486,8 @@ def _save_scan_to_postgres(
             )
             if br.returncode == 0 and br.stdout.strip():
                 branch = br.stdout.strip()
+
+        print(f"[CRA] Project id={project_id} branch={branch}")
 
         # Build unified violation list: all rule violations + AI violations
         # AI issues come via critical_issues (source=="ai"); rule violations
@@ -503,6 +507,7 @@ def _save_scan_to_postgres(
                 "category": v.category,
             })
 
+        ai_count = 0
         for issue in critical_issues:
             if issue.get("source") != "ai":
                 continue
@@ -516,6 +521,9 @@ def _save_scan_to_postgres(
                 "rule_id": issue.get("category") or "AI",
                 "category": issue.get("category", ""),
             })
+            ai_count += 1
+
+        print(f"[CRA] Saving {len(result.violations)} rule violations + {ai_count} AI violations to DB")
 
         errors = len([v for v in violations if v["severity"] == "error"])
         warnings = len([v for v in violations if v["severity"] == "warning"])
@@ -529,8 +537,9 @@ def _save_scan_to_postgres(
             violations=violations,
             quality_score=quality_score,
         )
-    except Exception:
-        pass  # never block a commit
+        print(f"[CRA] Saved to PostgreSQL: {total} violations ({errors} errors, {warnings} warnings)")
+    except Exception as _e:
+        print(f"[CRA] PostgreSQL save failed (non-blocking): {_e}")
 
 
 def run_as_hook() -> None:
