@@ -2004,22 +2004,45 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     "fix_suggestion": v.fix_suggestion if hasattr(v, 'fix_suggestion') else None
                 })
             
+            # Run AI review if an API key is configured — brings in security/logic
+            # violations that the rule engine cannot detect (e.g. hardcoded secrets,
+            # insecure patterns), so admin panel results match what the terminal shows.
+            _ai_sev_map = {"high": "error", "medium": "warning", "low": "info"}
+            try:
+                from agent.ai.ai_reviewer import run_ai_review
+                _, ai_issues = run_ai_review(
+                    files=files,
+                    project_root=scan_path,
+                    language=lang,
+                    framework=fw or "",
+                )
+                ai_count = 0
+                for issue in (ai_issues or []):
+                    raw_file = issue.get("file", "")
+                    # Normalize path: strip scan_path prefix if present
+                    if raw_file and os.path.isabs(raw_file):
+                        rel_file = make_relative(raw_file)
+                    else:
+                        rel_file = raw_file.replace("\\", "/")
+                    violations.append({
+                        "file": rel_file,
+                        "line": issue.get("line") or 0,
+                        "severity": _ai_sev_map.get(issue.get("severity", "medium"), "warning"),
+                        "message": issue.get("message", ""),
+                        "rule_id": issue.get("category") or "AI",
+                        "code_snippet": None,
+                        "fix_suggestion": issue.get("fix", ""),
+                    })
+                    ai_count += 1
+                print(f"[Scan] AI review added {ai_count} violations")
+            except Exception as e:
+                print(f"[Scan] AI review skipped: {e}")
+
             # Debug: Log sample violations
             print(f"[Scan] Sample violations being returned:")
             for v in violations[:5]:
                 print(f"  - {v['file']}:{v['line']} [{v['severity']}] {v['rule_id']}: {v['message'][:50]}")
-            
-            # Debug: Check for ESLint unused variable violations
-            unused_vars = [v for v in violations if 'unused' in v['rule_id'].lower()]
-            print(f"[Scan] Unused variable violations: {len(unused_vars)}")
-            for v in unused_vars[:5]:
-                print(f"  - {v['file']}:{v['line']} {v['rule_id']}")
-            
-            # Debug: Sample file paths
-            print(f"[Scan] Sample file paths in file_list:")
-            for f in file_list[:5]:
-                print(f"  - {f['path']}")
-            
+
             # Update analytics with scan results
             db = _get_db()
             quality_score = max(0, 100 - len([v for v in violations if v["severity"] == "error"]) * 5 - len([v for v in violations if v["severity"] == "warning"]) * 2)

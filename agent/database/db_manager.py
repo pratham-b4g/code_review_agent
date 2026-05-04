@@ -720,9 +720,16 @@ class DatabaseManager:
         """
         try:
             import json as _json
-            errors = sum(1 for v in violations if v.get("severity") == "error")
-            warnings = sum(1 for v in violations if v.get("severity") == "warning")
-            infos = sum(1 for v in violations if v.get("severity") == "info")
+            # Normalize AI severity values (high/medium/low) to rule-engine values
+            # (error/warning/info) so counts and attribution are consistent.
+            _sev_norm = {"high": "error", "medium": "warning", "low": "info"}
+
+            def _norm_sev(sev: str) -> str:
+                return _sev_norm.get(sev, sev) if sev not in ("error", "warning", "info") else sev
+
+            errors = sum(1 for v in violations if _norm_sev(v.get("severity", "info")) == "error")
+            warnings = sum(1 for v in violations if _norm_sev(v.get("severity", "info")) == "warning")
+            infos = sum(1 for v in violations if _norm_sev(v.get("severity", "info")) == "info")
 
             # Group violations by normalised file path
             files_with_issues: Dict[str, Dict[str, int]] = {}
@@ -733,7 +740,7 @@ class DatabaseManager:
                 bucket = files_with_issues.setdefault(fp, {
                     "errors": 0, "warnings": 0, "infos": 0, "total": 0
                 })
-                sev = v.get("severity", "info")
+                sev = _norm_sev(v.get("severity", "info"))
                 if sev == "error":
                     bucket["errors"] += 1
                 elif sev == "warning":
@@ -745,7 +752,7 @@ class DatabaseManager:
             # Store full violation details (cap at 200 to keep payload manageable)
             violations_to_store = [
                 {
-                    "severity": v.get("severity", "info"),
+                    "severity": _norm_sev(v.get("severity", "info")),
                     "file": (v.get("file") or "").replace("\\", "/"),
                     "line": v.get("line", 0),
                     "rule_id": v.get("rule_id", ""),
