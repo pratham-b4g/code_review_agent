@@ -2009,8 +2009,23 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             for v in violations[:5]:
                 print(f"  - {v['file']}:{v['line']} [{v['severity']}] {v['rule_id']}: {v['message'][:50]}")
 
-            # Update analytics with scan results
+            # Merge AI violations saved by the developer's git hook so they
+            # survive admin re-scans (the rule engine doesn't call the AI API).
             db = _get_db()
+            try:
+                existing_scans = db.get_project_scans(project_id=project_id, branch=branch or 'main')
+                if existing_scans:
+                    ai_violations = [
+                        v for v in (existing_scans[0].get('violations_json') or [])
+                        if v.get('source') == 'ai'
+                    ]
+                    if ai_violations:
+                        violations.extend(ai_violations)
+                        print(f"[Scan] Merged {len(ai_violations)} AI violations from previous push")
+            except Exception as e:
+                print(f"[Scan] Could not merge AI violations: {e}")
+
+            # Update analytics with scan results
             quality_score = max(0, 100 - len([v for v in violations if v["severity"] == "error"]) * 5 - len([v for v in violations if v["severity"] == "warning"]) * 2)
             db.log_analytics(
                 user_email=user_email,
@@ -2033,7 +2048,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 )
             except Exception as e:
                 print(f"[Scan] save_project_scan failed: {e}")
-            
+
             return {
                 "success": True,
                 "project_name": project_path.split('/')[-1] or project_path.split('\\')[-1],

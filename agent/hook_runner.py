@@ -508,6 +508,7 @@ def _save_scan_to_postgres(
                 continue
             raw_sev = issue.get("severity", "medium")
             violations.append({
+                "source": "ai",
                 "file": (issue.get("file") or "").replace("\\", "/"),
                 "line": issue.get("line") or 0,
                 "severity": _ai_sev_map.get(raw_sev, "warning"),
