@@ -2740,8 +2740,8 @@
         const res = await fetch('/api/mode');
         const data = await res.json();
         if (data.mode === 'admin') {
-          document.querySelector('[data-tab="developer"]').style.display = 'none';
-          switchLoginTab('admin');
+          // Keep both tabs visible so TLs can also log in via this URL
+          switchLoginTab('developer');
         } else {
           document.querySelector('[data-tab="admin"]').style.display = 'none';
           document.getElementById('devLoading').classList.remove('hidden');
