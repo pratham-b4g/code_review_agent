@@ -329,7 +329,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     db = _get_db()
                     projects = db.get_all_projects()
                     project = next((p for p in projects if str(p["id"]) == project_id), None)
-                    if project and project["path"].startswith(('http://', 'https://', 'git@')):
+                    _proj_path = (project.get("repo_url") or project.get("path", "")) if project else ""
+                    if project and _proj_path.startswith(('http://', 'https://', 'git@')):
                         # Try to read from temp directory if scan was recent
                         import tempfile
                         import glob
