@@ -888,7 +888,10 @@
             </div>
             <div class="grid gap-3" id="projectGrid">
               ${projects.length === 0 ? emptyState('No projects yet', 'Add your first project to start reviewing code.', 'showAddProjectModal()') : ''}
-              ${projects.map(p => `
+              ${projects.map(p => {
+                const isRemotePath = p.path && (p.path.startsWith('http') || p.path.startsWith('git@'));
+                const effectiveUrl = p.repo_url || (isRemotePath ? p.path : '');
+                return `
                 <div class="card p-4 fade-in" data-search="${(p.name + ' ' + p.path).toLowerCase()}">
                   <div class="flex justify-between items-start">
                     <div class="flex items-start gap-3">
@@ -897,22 +900,22 @@
                       </div>
                       <div>
                         <h3 class="font-semibold text-white text-sm">${p.name}</h3>
-                        <p class="text-xs text-gray-500 mono mt-0.5 truncate max-w-md">${p.path}</p>
-                        ${p.repo_url
-                          ? `<p class="text-[10px] text-accent-green mono mt-0.5 truncate max-w-md" title="${p.repo_url}">&#128279; ${p.repo_url}</p>`
+                        ${!isRemotePath ? `<p class="text-xs text-gray-500 mono mt-0.5 truncate max-w-md">${p.path}</p>` : ''}
+                        ${effectiveUrl
+                          ? `<p class="text-[10px] text-accent-green mono mt-0.5 truncate max-w-md" title="${effectiveUrl}">&#128279; ${effectiveUrl}</p>`
                           : `<p class="text-[10px] text-yellow-600 mt-0.5">&#9888; No GitHub URL — <button onclick="editRepoUrl(${p.id},'')" class="underline hover:text-yellow-400">Set URL</button></p>`}
                         <p class="text-[10px] text-gray-600 mt-1">Branch: ${p.main_branch}</p>
                       </div>
                     </div>
                     <div class="flex gap-1.5 shrink-0">
-                      <button onclick="editRepoUrl(${p.id},'${(p.repo_url||'').replace(/'/g,"\\'")}')" class="btn px-2.5 py-1.5 text-xs bg-white/5 text-gray-300 rounded-lg hover:bg-white/10 border border-border-subtle" title="Edit GitHub URL">URL</button>
+                      <button onclick="editRepoUrl(${p.id},'${(effectiveUrl).replace(/'/g,"\\'")}')" class="btn px-2.5 py-1.5 text-xs bg-white/5 text-gray-300 rounded-lg hover:bg-white/10 border border-border-subtle" title="Edit GitHub URL">URL</button>
                       <button onclick="viewProject(${p.id})" class="btn px-2.5 py-1.5 text-xs bg-white/5 text-gray-300 rounded-lg hover:bg-white/10 border border-border-subtle">Details</button>
                       <button onclick="assignUsers(${p.id})" class="btn px-2.5 py-1.5 text-xs bg-accent-purple/10 text-accent-purple rounded-lg hover:bg-accent-purple/20 border border-accent-purple/20">Assign</button>
                       <button onclick="openProjectReview(${p.id}, '${p.path.replace(/'/g, "\\'")}')" class="btn px-2.5 py-1.5 text-xs gradient-blue text-white rounded-lg hover:opacity-90">Review</button>
                     </div>
                   </div>
-                </div>
-              `).join('')}
+                </div>`;
+              }).join('')}
             </div>
           </div>
         `;
@@ -1899,7 +1902,7 @@
       if (newUrl === null) return; // cancelled
       try {
         const res = await fetch(`/api/projects/${projectId}/repo-url`, {
-          method: 'PUT',
+          method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({repo_url: newUrl.trim()})
         });
