@@ -436,8 +436,100 @@ def _post_review_to_server(
         # Trigger daily report if it is past 6:30 PM IST and not yet sent today
         check_and_send_report(project_key, developer_email)
 
+        # ── Also save to PostgreSQL so the admin panel shows the same violations ──
+        # AI issues (high/medium) are already in critical_issues; combine with
+        # all rule violations so the admin sees the full picture without re-calling AI.
+        _save_scan_to_postgres(
+            project_key=project_key,
+            developer_email=developer_email,
+            repo_root=repo_root,
+            result=result,
+            critical_issues=critical_issues or [],
+        )
+
     except Exception:
         pass  # never block a commit because of a store failure
+
+
+def _save_scan_to_postgres(
+    project_key: str,
+    developer_email: str,
+    repo_root: Optional[str],
+    result: "ReviewResult",
+    critical_issues: list,
+) -> None:
+    """Persist the full scan result (rule + AI violations) to PostgreSQL.
+
+    Called from _post_review_to_server after the local SQLite save, so the
+    admin panel always reflects what the developer sees in the terminal
+    without needing to re-run the AI reviewer on every admin Review click.
+    """
+    try:
+        import subprocess as _sp
+        from agent.database import DatabaseManager
+
+        db = DatabaseManager()
+        project = db.get_project_by_key(project_key)
+        if not project:
+            return
+
+        project_id = project["id"]
+
+        # Detect current branch
+        branch = "main"
+        if repo_root:
+            br = _sp.run(
+                ["git", "-C", repo_root, "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if br.returncode == 0 and br.stdout.strip():
+                branch = br.stdout.strip()
+
+        # Build unified violation list: all rule violations + AI violations
+        # AI issues come via critical_issues (source=="ai"); rule violations
+        # from result.violations cover all severities (error/warning/info).
+        _ai_sev_map = {"high": "error", "medium": "warning", "low": "info"}
+        violations: list = []
+
+        for v in result.violations:
+            sev = v.severity.value if hasattr(v.severity, "value") else str(v.severity)
+            fp = (v.file_path or "").replace("\\", "/")
+            violations.append({
+                "file": fp,
+                "line": v.line_number,
+                "severity": sev,
+                "message": v.message,
+                "rule_id": v.rule_id,
+                "category": v.category,
+            })
+
+        for issue in critical_issues:
+            if issue.get("source") != "ai":
+                continue
+            raw_sev = issue.get("severity", "medium")
+            violations.append({
+                "file": (issue.get("file") or "").replace("\\", "/"),
+                "line": issue.get("line") or 0,
+                "severity": _ai_sev_map.get(raw_sev, "warning"),
+                "message": issue.get("message", ""),
+                "rule_id": issue.get("category") or "AI",
+                "category": issue.get("category", ""),
+            })
+
+        errors = len([v for v in violations if v["severity"] == "error"])
+        warnings = len([v for v in violations if v["severity"] == "warning"])
+        total = len(violations)
+        quality_score = max(0.0, 100.0 - errors * 5 - warnings * 2)
+
+        db.save_project_scan(
+            project_id=project_id,
+            branch=branch,
+            scanned_by_email=developer_email,
+            violations=violations,
+            quality_score=quality_score,
+        )
+    except Exception:
+        pass  # never block a commit
 
 
 def run_as_hook() -> None:
