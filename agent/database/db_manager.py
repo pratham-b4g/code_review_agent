@@ -574,16 +574,20 @@ class DatabaseManager:
 
     def get_user_projects(self, user_email: str) -> List[Dict[str, Any]]:
         """Get projects assigned to a user."""
-        with self.connect() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT p.*, pa.role_on_project
-                    FROM projects p
-                    JOIN project_assignments pa ON p.id = pa.project_id
-                    WHERE pa.user_email = %s AND p.is_active = TRUE
-                    ORDER BY p.created_at DESC
-                """, (user_email,))
-                return [dict(row) for row in cur.fetchall()]
+        try:
+            with self.connect() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT p.*, pa.role_on_project
+                        FROM projects p
+                        JOIN project_assignments pa ON p.id = pa.project_id
+                        WHERE pa.user_email = %s AND p.is_active = TRUE
+                        ORDER BY p.created_at DESC
+                    """, (user_email,))
+                    return [dict(row) for row in cur.fetchall()]
+        except Exception as e:
+            print(f"[DB Error] get_user_projects: {e}")
+            return []
 
     def get_project_assignments(self, project_id: int) -> List[Dict[str, Any]]:
         """Get all users assigned to a project."""
@@ -650,25 +654,29 @@ class DatabaseManager:
 
     def get_pending_access_requests(self, tl_email: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get pending access requests with optional project info."""
-        with self.connect() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                if tl_email:
-                    cur.execute("""
-                        SELECT ar.*, p.name as project_name
-                        FROM access_requests ar
-                        LEFT JOIN projects p ON ar.project_id = p.id
-                        WHERE ar.tl_email = %s AND ar.status = 'pending'
-                        ORDER BY ar.requested_at DESC
-                    """, (tl_email,))
-                else:
-                    cur.execute("""
-                        SELECT ar.*, p.name as project_name
-                        FROM access_requests ar
-                        LEFT JOIN projects p ON ar.project_id = p.id
-                        WHERE ar.status = 'pending'
-                        ORDER BY ar.requested_at DESC
-                    """)
-                return [dict(row) for row in cur.fetchall()]
+        try:
+            with self.connect() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    if tl_email:
+                        cur.execute("""
+                            SELECT ar.*, p.name as project_name
+                            FROM access_requests ar
+                            LEFT JOIN projects p ON ar.project_id = p.id
+                            WHERE ar.tl_email = %s AND ar.status = 'pending'
+                            ORDER BY ar.requested_at DESC
+                        """, (tl_email,))
+                    else:
+                        cur.execute("""
+                            SELECT ar.*, p.name as project_name
+                            FROM access_requests ar
+                            LEFT JOIN projects p ON ar.project_id = p.id
+                            WHERE ar.status = 'pending'
+                            ORDER BY ar.requested_at DESC
+                        """)
+                    return [dict(row) for row in cur.fetchall()]
+        except Exception as e:
+            print(f"[DB Error] get_pending_access_requests: {e}")
+            return []
 
     def respond_to_access_request(self, request_id: int, status: str, responded_by: int,
                                   notes: str = "", approved_role: str = "developer") -> bool:

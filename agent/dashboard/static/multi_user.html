@@ -1022,7 +1022,8 @@
     async function loadAccessRequestsView(panel) {
       try {
         const res = await fetch(`/api/access-requests?t=${Date.now()}`);
-        const requests = await res.json();
+        const raw = await res.json();
+        const requests = Array.isArray(raw) ? raw : [];
         panel.innerHTML = `
           <div class="p-6 fade-in">
             <h2 class="text-lg font-bold text-white mb-1">Access Requests</h2>
@@ -1628,7 +1629,8 @@
     async function loadMyProjectsView(panel) {
       try {
         const res = await fetch(`/api/my-projects?t=${Date.now()}`);
-        const projects = await res.json();
+        const raw = await res.json();
+        const projects = Array.isArray(raw) ? raw : [];
         const canManage = currentRole === 'super_admin' || currentRole === 'admin';
         const isTL = currentRole === 'admin' || currentRole === 'super_admin';
         panel.innerHTML = `
@@ -2740,10 +2742,8 @@
         const res = await fetch('/api/mode');
         const data = await res.json();
         if (data.mode === 'admin') {
-          // Both tabs visible; skip git auto-detect — just show the email input
-          switchLoginTab('developer');
-          document.getElementById('devLoading').classList.add('hidden');
-          document.getElementById('devLoginBtn').classList.remove('hidden');
+          document.querySelector('[data-tab="developer"]').style.display = 'none';
+          switchLoginTab('admin');
         } else {
           document.querySelector('[data-tab="admin"]').style.display = 'none';
           document.getElementById('devLoading').classList.remove('hidden');
