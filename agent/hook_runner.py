@@ -551,6 +551,24 @@ def _save_scan_to_postgres(
         if ai_violations:
             db.save_ai_violations(project_id=project_id, branch=branch, ai_violations=ai_violations)
 
+        # Log developer activity even for blocked commits (commits_count=0 preserves
+        # existing commit count but records issues_found so the TL sees the attempt
+        # in the daily report even when no commit was successfully made).
+        try:
+            from datetime import date as _date
+            db.log_analytics(
+                user_email=developer_email,
+                project_id=project_id,
+                date=_date.today(),
+                branch=branch,
+                commits_count=0,      # blocked — no commit happened
+                issues_found=total,
+                code_quality_score=quality_score,
+                effort_score=0,
+            )
+        except Exception as _ae:
+            print(f"[CRA] analytics log failed (non-blocking): {_ae}")
+
         print(f"[CRA] Saved to PostgreSQL: {total} rule + {len(ai_violations)} AI violations")
     except Exception as _e:
         print(f"[CRA] PostgreSQL save failed (non-blocking): {_e}")
