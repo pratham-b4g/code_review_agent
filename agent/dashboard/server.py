@@ -34,6 +34,12 @@ _launch_context: Dict[str, Any] = {}  # {project_dir, branch, repo_url}
 _scan_result: Dict[str, Any] = {}
 _scan_lock = threading.Lock()
 
+# Keep the last temp clone dir alive per (project_id, branch) so /api/file-content
+# can read file content after the scan finishes.  Keyed by "project_id:branch".
+# Old dirs are removed when a new scan for the same key replaces them.
+_last_temp_dirs: Dict[str, str] = {}
+_last_temp_lock = threading.Lock()
+
 
 def _serialize_violations(violations: list) -> List[Dict[str, Any]]:
     """Convert Violation dataclass instances to plain dicts."""
@@ -324,24 +330,28 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     self._json_response({"path": filepath, "lines": lines})
                     return
                 
-                # If not found and project_id provided, try to find in temp clone
+                # If not found and project_id provided, look in stored temp clone
                 if project_id:
-                    db = _get_db()
-                    projects = db.get_all_projects()
-                    project = next((p for p in projects if str(p["id"]) == project_id), None)
-                    _proj_path = (project.get("repo_url") or project.get("path", "")) if project else ""
-                    if project and _proj_path.startswith(('http://', 'https://', 'git@')):
-                        # Try to read from temp directory if scan was recent
-                        import tempfile
-                        import glob
-                        temp_dirs = glob.glob(os.path.join(tempfile.gettempdir(), 'cra_scan_*'))
-                        for temp_dir in sorted(temp_dirs, key=os.path.getmtime, reverse=True)[:3]:
-                            temp_path = os.path.join(temp_dir, filepath)
-                            if os.path.isfile(temp_path):
-                                lines = Path(temp_path).read_text(encoding="utf-8", errors="replace").splitlines()
-                                self._json_response({"path": filepath, "lines": lines})
-                                return
-                
+                    # Check all cached temp dirs for this project (any branch)
+                    with _last_temp_lock:
+                        candidate_dirs = [
+                            d for k, d in _last_temp_dirs.items()
+                            if k.startswith(f"{project_id}:")
+                        ]
+                    # Also fall back to any recent cra_scan_* dirs on disk
+                    import tempfile as _tf, glob as _glob
+                    disk_dirs = _glob.glob(os.path.join(_tf.gettempdir(), 'cra_scan_*'))
+                    disk_dirs_sorted = sorted(disk_dirs, key=os.path.getmtime, reverse=True)[:5]
+                    search_dirs = candidate_dirs + [d for d in disk_dirs_sorted if d not in candidate_dirs]
+                    for td in search_dirs:
+                        if not os.path.isdir(td):
+                            continue
+                        temp_path = os.path.join(td, filepath.replace('/', os.sep))
+                        if os.path.isfile(temp_path):
+                            lines = Path(temp_path).read_text(encoding="utf-8", errors="replace").splitlines()
+                            self._json_response({"path": filepath, "lines": lines})
+                            return
+
                 self._json_response({"error": "File not found"}, 404)
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
@@ -2161,21 +2171,36 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             # Use the existing _scan_project logic but with the branch-specific path
             # Pass temp_dir as strip_base so file paths are properly relativized
             result = self._scan_project(scan_path, project_id, user_email, strip_base=temp_dir or scan_path, branch=branch)
-            
+
+            # Keep temp_dir alive for /api/file-content; evict the previous one.
+            if temp_dir and isinstance(result, dict) and result.get("success"):
+                cache_key = f"{project_id}:{branch}"
+                with _last_temp_lock:
+                    old = _last_temp_dirs.get(cache_key)
+                    _last_temp_dirs[cache_key] = temp_dir
+                    temp_dir = None  # don't delete in finally
+                # Remove the previous temp clone now that we have a fresher one
+                if old and os.path.exists(old):
+                    try:
+                        import shutil as _sh
+                        _sh.rmtree(old, ignore_errors=True)
+                    except Exception:
+                        pass
+
             # Add branch info to result
             if isinstance(result, dict) and result.get("success"):
                 result["branch"] = branch
-            
+
             return result
-            
+
         except Exception as e:
             print(f"[Scan Branch Error] {e}")
             return {"success": False, "error": str(e)}
         finally:
-            # Clean up temp directory if we cloned
+            # Only delete if we didn't store it above (failed scans, non-URL repos)
             if temp_dir and os.path.exists(temp_dir):
                 try:
-                    shutil.rmtree(temp_dir)
+                    shutil.rmtree(temp_dir, ignore_errors=True)
                 except Exception:
                     pass
 
