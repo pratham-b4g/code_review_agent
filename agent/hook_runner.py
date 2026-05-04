@@ -550,6 +550,10 @@ def _save_scan_to_postgres(
         # Accumulate AI violations separately — never lost across subprojects or admin rescans
         if ai_violations:
             db.save_ai_violations(project_id=project_id, branch=branch, ai_violations=ai_violations)
+        # Accumulate rule violations from hook (staged/blocked code) — admin rescan
+        # overwrites violations_json with remote code, so keep a separate copy here.
+        if violations:
+            db.save_hook_violations(project_id=project_id, branch=branch, violations=violations)
 
         # Log developer activity even for blocked commits (commits_count=0 preserves
         # existing commit count but records issues_found so the TL sees the attempt

@@ -128,6 +128,7 @@ class DatabaseManager:
                     "ALTER TABLE projects ADD COLUMN IF NOT EXISTS repo_url VARCHAR(500)",
                     "ALTER TABLE project_scans ADD COLUMN IF NOT EXISTS violations_json JSONB DEFAULT '[]'::jsonb",
                     "ALTER TABLE project_scans ADD COLUMN IF NOT EXISTS ai_violations_json JSONB DEFAULT '[]'::jsonb",
+                    "ALTER TABLE project_scans ADD COLUMN IF NOT EXISTS hook_violations_json JSONB DEFAULT '[]'::jsonb",
                 ]:
                     try:
                         cur.execute(_migration)
@@ -260,6 +261,7 @@ class DatabaseManager:
                         quality_score DECIMAL(5,2),
                         violations_json JSONB DEFAULT '[]'::jsonb,
                         ai_violations_json JSONB DEFAULT '[]'::jsonb,
+                        hook_violations_json JSONB DEFAULT '[]'::jsonb,
                         PRIMARY KEY (project_id, branch)
                     )
                 """)
@@ -807,6 +809,51 @@ class DatabaseManager:
                     return True
         except Exception as e:
             print(f"[DB Error] save_project_scan: {e}")
+            return False
+
+    def save_hook_violations(self, project_id: int, branch: str, violations: List[Dict[str, Any]]) -> bool:
+        """Accumulate rule-engine violations from hook runs into hook_violations_json.
+
+        These are violations found on STAGED (uncommitted) code. Admin rescans
+        never touch this column, so TLs can always see what blocked a commit
+        even after the developer fixes the code and the admin rescans.
+        Deduped by (file, line, rule_id). Capped at 200.
+        """
+        try:
+            import json as _json
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO project_scans (project_id, branch)
+                        VALUES (%s, %s)
+                        ON CONFLICT (project_id, branch) DO NOTHING
+                    """, (project_id, branch))
+                    cur.execute(
+                        "SELECT hook_violations_json FROM project_scans WHERE project_id=%s AND branch=%s",
+                        (project_id, branch)
+                    )
+                    row = cur.fetchone()
+                    existing = []
+                    if row and row[0]:
+                        try:
+                            existing = _json.loads(row[0]) if isinstance(row[0], str) else (row[0] or [])
+                        except Exception:
+                            existing = []
+                    seen = {(v.get("file", ""), v.get("line", 0), v.get("rule_id", "")) for v in existing}
+                    for v in violations:
+                        key = (v.get("file", ""), v.get("line", 0), v.get("rule_id", ""))
+                        if key not in seen:
+                            existing.append(v)
+                            seen.add(key)
+                    merged = existing[:200]
+                    cur.execute(
+                        "UPDATE project_scans SET hook_violations_json=%s WHERE project_id=%s AND branch=%s",
+                        (_json.dumps(merged), project_id, branch)
+                    )
+                    conn.commit()
+                    return True
+        except Exception as e:
+            print(f"[DB Error] save_hook_violations: {e}")
             return False
 
     def save_ai_violations(self, project_id: int, branch: str, ai_violations: List[Dict[str, Any]]) -> bool:

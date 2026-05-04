@@ -2050,15 +2050,22 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 existing_scans = db.get_project_scans(project_id=project_id, branch=branch or 'main')
                 if existing_scans:
                     row = existing_scans[0]
+                    import json as _j
                     ai_json = row.get('ai_violations_json') or []
                     if isinstance(ai_json, str):
-                        import json as _j
                         ai_json = _j.loads(ai_json)
                     print(f"[Scan] AI violations from hook: {len(ai_json)}")
                     if ai_json:
                         violations.extend(ai_json)
+
+                    hook_json = row.get('hook_violations_json') or []
+                    if isinstance(hook_json, str):
+                        hook_json = _j.loads(hook_json)
+                    print(f"[Scan] Hook rule violations from pre-commit: {len(hook_json)}")
+                    if hook_json:
+                        violations.extend(hook_json)
                 else:
-                    print(f"[Scan] No existing scan for project_id={project_id} branch={branch or 'main'} — no AI violations to merge")
+                    print(f"[Scan] No existing scan for project_id={project_id} branch={branch or 'main'} — no hook/AI violations to merge")
             except Exception as e:
                 print(f"[Scan] Could not load AI violations: {e}")
 
