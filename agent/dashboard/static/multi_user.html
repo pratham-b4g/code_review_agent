@@ -2740,8 +2740,10 @@
         const res = await fetch('/api/mode');
         const data = await res.json();
         if (data.mode === 'admin') {
-          // Keep both tabs visible so TLs can also log in via this URL
+          // Both tabs visible; skip git auto-detect — just show the email input
           switchLoginTab('developer');
+          document.getElementById('devLoading').classList.add('hidden');
+          document.getElementById('devLoginBtn').classList.remove('hidden');
         } else {
           document.querySelector('[data-tab="admin"]').style.display = 'none';
           document.getElementById('devLoading').classList.remove('hidden');
