@@ -997,6 +997,24 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response({"error": str(e)}, 500)
             return
 
+        # Admin: get report settings for any TL (super_admin only)
+        import re as _re
+        _user_report_match = _re.match(r"^/api/users/([^/]+)/report-settings$", path)
+        if _user_report_match:
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401); return
+            if _current_user.get("role") != "super_admin":
+                self._json_response({"error": "Forbidden: super admin only"}, 403); return
+            try:
+                import urllib.parse as _up
+                target_email = _up.unquote(_user_report_match.group(1))
+                db = _get_db()
+                settings = db.get_report_settings(target_email)
+                self._json_response({"success": True, "settings": settings})
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
         if path == "/" or path == "":
             self.path = "/index.html"
 
@@ -1590,6 +1608,43 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 )
                 self._json_response({"success": ok,
                                      "settings": db.get_report_settings(_current_user["email"])})
+            except Exception as e:
+                self._json_response({"error": str(e)}, 500)
+            return
+
+        # ── Admin: update report settings for any TL (super_admin only) ──
+        import re as _re2
+        _user_report_post = _re2.match(r"^/api/users/([^/]+)/report-settings$", path)
+        if _user_report_post:
+            if not _current_user:
+                self._json_response({"error": "Unauthorized"}, 401); return
+            if _current_user.get("role") != "super_admin":
+                self._json_response({"error": "Forbidden: super admin only"}, 403); return
+            try:
+                import urllib.parse as _up2
+                target_email = _up2.unquote(_user_report_post.group(1))
+                db = _get_db()
+                url = (data.get("teams_webhook_url") or "").strip()
+                if url and not url.lower().startswith("https://"):
+                    self._json_response({"error": "Webhook URL must start with https://"}, 400); return
+                rt = (data.get("report_time") or "").strip()
+                if rt:
+                    parts = rt.split(":")
+                    if len(parts) != 2 or not (parts[0].isdigit() and parts[1].isdigit()) \
+                            or not (0 <= int(parts[0]) < 24 and 0 <= int(parts[1]) < 60):
+                        self._json_response({"error": "report_time must be HH:MM (24h)"}, 400); return
+                freq = (data.get("report_frequency") or "daily").lower()
+                if freq not in ("daily", "weekly", "monthly"):
+                    self._json_response({"error": "Invalid frequency"}, 400); return
+                ok = db.update_report_settings(
+                    target_email,
+                    teams_webhook_url=url,
+                    report_time=rt,
+                    report_timezone=(data.get("report_timezone") or "Asia/Kolkata").strip(),
+                    report_enabled=bool(data.get("report_enabled")),
+                    report_frequency=freq,
+                )
+                self._json_response({"success": ok, "settings": db.get_report_settings(target_email)})
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
             return

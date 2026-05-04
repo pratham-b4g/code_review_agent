@@ -643,7 +643,8 @@
           { id: 'my-projects', label: 'My Projects', icon: '<svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>' },
           { id: 'developers', label: 'My Developers', icon: '<svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>' },
           { id: 'access-requests', label: 'Access Requests', icon: '<svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>' },
-          { id: 'analytics', label: 'Team Analytics', icon: '<svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>' }
+          { id: 'analytics', label: 'Team Analytics', icon: '<svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>' },
+          { id: 'settings', label: 'Settings', icon: '<svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>' }
         );
       } else {
         items.push(
@@ -953,6 +954,7 @@
                     </div>
                     <span class="severity-badge ${roleBg} border">${roleLabel}</span>
                     <span class="text-xs ${u.is_active ? 'text-accent-green' : 'text-gray-500'}">${u.is_active ? 'Active' : 'Inactive'}</span>
+                    ${(u.role === 'admin' || u.role === 'super_admin') ? `<button onclick="showTLReportSettings('${u.email}', '${u.name.replace(/'/g, "\\'")}')" class="btn px-2.5 py-1.5 text-xs bg-accent-purple/10 text-accent-purple rounded-lg hover:bg-accent-purple/20 border border-accent-purple/20">Report</button>` : ''}
                     <button onclick="manageUserProjects('${u.email}', '${u.name.replace(/'/g, "\\'")}')" class="btn px-2.5 py-1.5 text-xs bg-accent-blue/10 text-accent-blue rounded-lg hover:bg-accent-blue/20 border border-accent-blue/20">Manage Projects</button>
                   </div>
                 `;
@@ -1015,6 +1017,83 @@
         let msg = ''; if (added) msg += `${added} added`; if (removed) msg += (msg ? ', ' : '') + `${removed} removed`; if (!msg) msg = 'No changes';
         showNotification(msg, 'success');
         closeModal('manageUserProjectsModal');
+      } catch (e) { showNotification('Error: ' + e.message, 'error'); }
+    }
+
+    // ── Admin: Set Report Settings for a TL ─────────────────────
+    async function showTLReportSettings(email, name) {
+      try {
+        const r = await fetch(`/api/users/${encodeURIComponent(email)}/report-settings`);
+        const j = await r.json();
+        const s = j.settings || {};
+        showModal('tlReportSettingsModal', `
+          <h3 class="text-lg font-bold text-white mb-1">Report Settings</h3>
+          <div class="flex items-center gap-2 mb-4">
+            ${avatarHTML(name, 'sm')}
+            <div><div class="text-sm text-white">${name}</div><div class="text-xs text-gray-500 mono">${email}</div></div>
+          </div>
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-400 mb-1">Teams Webhook URL</label>
+              <input id="tlWebhookUrl" type="text" value="${s.teams_webhook_url || ''}" placeholder="https://..." class="w-full bg-bg-dark border border-border-subtle rounded-lg px-3 py-2 text-sm text-white" />
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1">Report Time (24h)</label>
+                <input id="tlReportTime" type="time" value="${s.report_time || ''}" class="w-full bg-bg-dark border border-border-subtle rounded-lg px-3 py-2 text-sm text-white" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1">Timezone</label>
+                <select id="tlReportTz" class="w-full bg-bg-dark border border-border-subtle rounded-lg px-3 py-2 text-sm text-white">
+                  ${['Asia/Kolkata','Asia/Dubai','Asia/Singapore','Europe/London','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','UTC'].map(tz => `<option value="${tz}" ${(s.report_timezone||'Asia/Kolkata')===tz?'selected':''}>${tz}</option>`).join('')}
+                </select>
+              </div>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-400 mb-1">Frequency</label>
+              <select id="tlReportFreq" class="w-full bg-bg-dark border border-border-subtle rounded-lg px-3 py-2 text-sm text-white">
+                <option value="daily" ${(s.report_frequency||'daily')==='daily'?'selected':''}>Daily</option>
+                <option value="weekly" ${s.report_frequency==='weekly'?'selected':''}>Weekly (Monday)</option>
+                <option value="monthly" ${s.report_frequency==='monthly'?'selected':''}>Monthly (1st)</option>
+              </select>
+            </div>
+            <div class="flex items-center gap-2">
+              <input id="tlReportEnabled" type="checkbox" ${s.report_enabled?'checked':''} class="w-4 h-4 accent-accent-blue" />
+              <label for="tlReportEnabled" class="text-sm text-gray-300">Enable scheduled reports</label>
+            </div>
+          </div>
+          <div id="tlReportStatus" class="text-xs mt-2 min-h-[16px]"></div>
+          <div class="flex gap-2 mt-4">
+            <button onclick="closeModal('tlReportSettingsModal')" class="btn flex-1 bg-white/5 text-gray-300 py-2.5 rounded-lg hover:bg-white/10 text-sm border border-border-subtle">Cancel</button>
+            <button onclick="saveTLReportSettings('${email}')" class="btn flex-1 gradient-blue text-white py-2.5 rounded-lg hover:opacity-90 text-sm">Save</button>
+          </div>
+        `);
+      } catch (e) { showNotification('Error: ' + e.message, 'error'); }
+    }
+
+    async function saveTLReportSettings(email) {
+      const payload = {
+        teams_webhook_url: document.getElementById('tlWebhookUrl')?.value || '',
+        report_time:       document.getElementById('tlReportTime')?.value || '',
+        report_timezone:   document.getElementById('tlReportTz')?.value || 'Asia/Kolkata',
+        report_frequency:  document.getElementById('tlReportFreq')?.value || 'daily',
+        report_enabled:    !!document.getElementById('tlReportEnabled')?.checked,
+      };
+      try {
+        const r = await fetch(`/api/users/${encodeURIComponent(email)}/report-settings`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const j = await r.json();
+        const st = document.getElementById('tlReportStatus');
+        if (r.ok && j.success) {
+          if (st) st.innerHTML = '<span class="text-accent-green">Saved.</span>';
+          showNotification('Report settings saved', 'success');
+        } else {
+          const msg = (j && j.error) || 'Save failed';
+          if (st) st.innerHTML = `<span class="text-accent-red">${msg}</span>`;
+          showNotification(msg, 'error');
+        }
       } catch (e) { showNotification('Error: ' + e.message, 'error'); }
     }
 
