@@ -288,6 +288,7 @@ def prompt_tl_setup() -> None:
         project_name = input("  Project name                                          : ").strip()
         tl_name      = input("  Your name (TL)                                        : ").strip()
         tl_email     = input("  Your email (TL)                                       : ").strip()
+        repo_url     = input("  GitHub repo URL (e.g. https://github.com/org/repo)   : ").strip() or None
     except KeyboardInterrupt:
         print("\n[WARNING] Cancelled.")
         return
@@ -312,7 +313,7 @@ def prompt_tl_setup() -> None:
             tl_user = db.get_user_by_email(tl_email)
             created_by = tl_user["id"] if tl_user else 0
             project_id, project_key = db.create_project(
-                project_name, repo_root, "main", created_by
+                project_name, repo_root, "main", created_by, repo_url=repo_url
             )
             # Auto-assign TL to the project
             if project_id:
@@ -343,6 +344,7 @@ def prompt_tl_setup() -> None:
             "name": project_name,
             "tl_name": tl_name,
             "tl_email": tl_email,
+            "repo_url": repo_url or "",
         }
         config_file.write_text(_json.dumps(config_data, indent=2), encoding="utf-8")
 

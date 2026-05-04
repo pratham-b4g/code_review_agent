@@ -671,10 +671,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 import tempfile
                 import shutil
                 
-                project_path = project["path"]
+                # Use repo_url if set; fall back to path (handles remote-machine local paths)
+                project_path = project.get("repo_url") or project["path"]
                 branches = []
                 temp_dir = None
-                
+
                 try:
                     if project_path.startswith(('http://', 'https://', 'git@')):
                         # For remote repos, use git ls-remote to get branches
@@ -807,7 +808,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         self._json_response({"error": "Not assigned to this project"}, 403)
                         return
 
-                project_path = project["path"]
+                # Prefer repo_url for remote scanning; fall back to local path
+                project_path = project.get("repo_url") or project["path"]
 
                 # Check if branch parameter is specified; otherwise use the
                 # project's configured `main_branch` (dynamic per-project).
@@ -1335,7 +1337,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 def _one(task):
                     p, p_path, br = task
                     try:
-                        res = self._scan_project_branch(p.get('path'), p['id'], viewer_email, branch=br)
+                        res = self._scan_project_branch(p.get('repo_url') or p.get('path'), p['id'], viewer_email, branch=br)
                         return (p['id'], br, bool(res.get("success")), res.get("error") or "")
                     except Exception as e:
                         return (p['id'], br, False, str(e))

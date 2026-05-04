@@ -117,18 +117,20 @@ class DatabaseManager:
                         created_by INTEGER REFERENCES users(id),
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         is_active BOOLEAN DEFAULT TRUE,
-                        project_key VARCHAR(64) UNIQUE
+                        project_key VARCHAR(64) UNIQUE,
+                        repo_url VARCHAR(500)
                     )
                 """)
 
-                # Migration: add project_key to existing installs
-                try:
-                    cur.execute("""
-                        ALTER TABLE projects
-                        ADD COLUMN IF NOT EXISTS project_key VARCHAR(64) UNIQUE
-                    """)
-                except Exception:
-                    pass
+                # Migrations for existing installs
+                for _migration in [
+                    "ALTER TABLE projects ADD COLUMN IF NOT EXISTS project_key VARCHAR(64) UNIQUE",
+                    "ALTER TABLE projects ADD COLUMN IF NOT EXISTS repo_url VARCHAR(500)",
+                ]:
+                    try:
+                        cur.execute(_migration)
+                    except Exception:
+                        pass
 
                 # Project assignments (TLs and Developers assigned to projects)
                 cur.execute("""
@@ -454,7 +456,7 @@ class DatabaseManager:
             print(f"[DB Error] get_tls_with_schedules: {e}")
             return []
 
-    def create_project(self, name: str, path: str, main_branch: str, created_by: int) -> tuple:
+    def create_project(self, name: str, path: str, main_branch: str, created_by: int, repo_url: Optional[str] = None) -> tuple:
         """Create a new project. Returns (project_id, project_key).
 
         If a project with the same path already exists (case-insensitive,
@@ -485,16 +487,16 @@ class DatabaseManager:
                     new_key = _secrets.token_hex(8)
                     if created_by:
                         cur.execute("""
-                            INSERT INTO projects (name, path, main_branch, created_by, project_key)
-                            VALUES (%s, %s, %s, %s, %s)
+                            INSERT INTO projects (name, path, main_branch, created_by, project_key, repo_url)
+                            VALUES (%s, %s, %s, %s, %s, %s)
                             RETURNING id
-                        """, (name, path, main_branch, created_by, new_key))
+                        """, (name, path, main_branch, created_by, new_key, repo_url or None))
                     else:
                         cur.execute("""
-                            INSERT INTO projects (name, path, main_branch, project_key)
-                            VALUES (%s, %s, %s, %s)
+                            INSERT INTO projects (name, path, main_branch, project_key, repo_url)
+                            VALUES (%s, %s, %s, %s, %s)
                             RETURNING id
-                        """, (name, path, main_branch, new_key))
+                        """, (name, path, main_branch, new_key, repo_url or None))
                     result = cur.fetchone()
                     conn.commit()
                     return (result["id"], new_key) if result else (None, new_key)
