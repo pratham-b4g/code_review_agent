@@ -30,6 +30,11 @@ try:
 except Exception:  # pragma: no cover — stdlib in py3.9+
     ZoneInfo = None  # type: ignore[assignment]
 
+try:
+    import pytz as _pytz
+except Exception:
+    _pytz = None  # type: ignore[assignment]
+
 
 _scheduler_thread: Optional[threading.Thread] = None
 _stop_event = threading.Event()
@@ -42,11 +47,20 @@ _CATCHUP_MINUTES = 15
 # ─── helpers ────────────────────────────────────────────────────────────────
 
 def _now_in_tz(tz_name: str) -> datetime:
+    # pytz bundles its own timezone data — works on all platforms including
+    # Windows where the system IANA database is absent.
+    if _pytz is not None:
+        try:
+            tz = _pytz.timezone(tz_name)
+            return datetime.now(tz)
+        except Exception:
+            pass
     if ZoneInfo is not None:
         try:
             return datetime.now(ZoneInfo(tz_name))
         except Exception:
             pass
+    print(f"[Scheduler] WARNING: could not resolve timezone '{tz_name}', using UTC")
     return datetime.utcnow()
 
 
