@@ -1048,16 +1048,28 @@ class DatabaseManager:
             with self.connect() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
-                    # 1. Projects this TL is assigned to (any role_on_project)
-                    cur.execute("""
-                        SELECT p.id, p.name
-                        FROM projects p
-                        JOIN project_assignments pa ON p.id = pa.project_id
-                        WHERE pa.user_email = %s
-                          AND p.is_active = TRUE
-                        ORDER BY p.name
-                    """, (tl_email,))
+                    # 1. Get TL's role in users table
+                    cur.execute("SELECT role FROM users WHERE email = %s", (tl_email,))
+                    tl_row = cur.fetchone()
+                    tl_role = (tl_row['role'] if tl_row else '') or ''
+                    print(f"[Report] get_tl_report_data: tl={tl_email} role={tl_role}")
+
+                    # super_admin sees all projects; admin/tl sees only assigned projects
+                    if tl_role == 'super_admin':
+                        cur.execute("""
+                            SELECT id, name FROM projects
+                            WHERE is_active = TRUE ORDER BY name
+                        """)
+                    else:
+                        cur.execute("""
+                            SELECT p.id, p.name
+                            FROM projects p
+                            JOIN project_assignments pa ON p.id = pa.project_id
+                            WHERE pa.user_email = %s AND p.is_active = TRUE
+                            ORDER BY p.name
+                        """, (tl_email,))
                     projects = [dict(r) for r in cur.fetchall()]
+                    print(f"[Report] found {len(projects)} project(s): {[p['name'] for p in projects]}")
 
                     result = []
                     for proj in projects:

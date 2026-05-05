@@ -168,6 +168,11 @@ def _send_report_for(db, tracker, teams_mod, email_mod, tl: dict,  # noqa: ARG00
     # Use DB-based analytics (developer_analytics table populated by hook_runner)
     # instead of git — works even when repos aren't locally cloned.
     projects_data = db.get_tl_report_data(email, days=days)
+    print(f"[Scheduler] get_tl_report_data returned {len(projects_data)} project(s) for {email}")
+    for p in projects_data:
+        devs = p.get('developers', [])
+        print(f"[Scheduler]   project={p.get('project_name')} devs={[d['name'] for d in devs]} "
+              f"total_commits={p.get('total_commits')} total_issues={p.get('total_issues')}")
 
     date_label = now_local.strftime("%A, %d %b %Y")
     any_success = False
