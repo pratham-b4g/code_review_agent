@@ -1606,6 +1606,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     email_reports_enabled=bool(data.get("email_reports_enabled"))
                                      if "email_reports_enabled" in data else None,
                 )
+                if ok:
+                    try:
+                        from agent.utils.report_scheduler import notify_settings_changed
+                        notify_settings_changed()
+                    except Exception:
+                        pass
                 self._json_response({"success": ok,
                                      "settings": db.get_report_settings(_current_user["email"])})
             except Exception as e:
@@ -1644,6 +1650,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     report_enabled=bool(data.get("report_enabled")),
                     report_frequency=freq,
                 )
+                if ok:
+                    try:
+                        from agent.utils.report_scheduler import notify_settings_changed
+                        notify_settings_changed()
+                    except Exception:
+                        pass
                 self._json_response({"success": ok, "settings": db.get_report_settings(target_email)})
             except Exception as e:
                 self._json_response({"error": str(e)}, 500)
