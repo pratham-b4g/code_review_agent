@@ -2092,7 +2092,7 @@
     async function submitAssignUsers(projectId) {
       try {
         const toAdd = [], toRemove = [];
-        document.querySelectorAll('input[name="assignTL"]').forEach(cb => { if (cb.dataset.wasAssigned!=='true'&&cb.checked) toAdd.push({email:cb.value,role:'admin'}); if (cb.dataset.wasAssigned==='true'&&!cb.checked) toRemove.push(cb.value); });
+        document.querySelectorAll('input[name="assignTL"]').forEach(cb => { if (cb.dataset.wasAssigned!=='true'&&cb.checked) toAdd.push({email:cb.value,role:'tl'}); if (cb.dataset.wasAssigned==='true'&&!cb.checked) toRemove.push(cb.value); });
         document.querySelectorAll('input[name="assignDev"]').forEach(cb => { if (cb.dataset.wasAssigned!=='true'&&cb.checked) toAdd.push({email:cb.value,role:'developer'}); if (cb.dataset.wasAssigned==='true'&&!cb.checked) toRemove.push(cb.value); });
         let added=0,removed=0;
         for (const u of toAdd) { const r = await fetch('/api/project-assignments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_id:projectId,user_email:u.email,role:u.role})}); if(r.ok)added++; }
