@@ -1048,13 +1048,12 @@ class DatabaseManager:
             with self.connect() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
-                    # 1. Projects where this TL is admin
+                    # 1. Projects this TL is assigned to (any role_on_project)
                     cur.execute("""
                         SELECT p.id, p.name
                         FROM projects p
                         JOIN project_assignments pa ON p.id = pa.project_id
                         WHERE pa.user_email = %s
-                          AND pa.role_on_project = 'admin'
                           AND p.is_active = TRUE
                         ORDER BY p.name
                     """, (tl_email,))
@@ -1065,15 +1064,15 @@ class DatabaseManager:
                         pid  = proj['id']
                         pname = proj['name']
 
-                        # 2. Developers assigned to this project
+                        # 2. All users assigned to this project (excluding the TL themselves)
                         cur.execute("""
-                            SELECT pa.user_email, u.name
+                            SELECT pa.user_email, u.name, u.role
                             FROM project_assignments pa
                             JOIN users u ON pa.user_email = u.email
                             WHERE pa.project_id = %s
-                              AND u.role = 'developer'
                               AND u.is_active = TRUE
-                        """, (pid,))
+                              AND pa.user_email != %s
+                        """, (pid, tl_email))
                         assigned = [dict(r) for r in cur.fetchall()]
                         if not assigned:
                             continue
