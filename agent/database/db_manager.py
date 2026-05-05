@@ -1026,6 +1026,170 @@ class DatabaseManager:
                 cur.execute(query, params)
                 return [dict(row) for row in cur.fetchall()]
 
+    def get_tl_report_data(self, tl_email: str, days: int = 1) -> List[Dict[str, Any]]:
+        """Return per-project, per-developer report data for scheduled reports.
+
+        Uses developer_analytics (populated by hook_runner on every commit/block)
+        instead of git, so it works even when repos aren't locally cloned.
+
+        For each developer returns:
+          commits / issues / quality_score for the current period
+          commits_delta / issues_delta / quality_delta vs the previous same-length period
+          issue_details from project_scans violations (hook + admin scan)
+        """
+        import json as _j
+        from datetime import timedelta
+        today = date.today()
+        curr_start = today - timedelta(days=days)
+        prev_start = today - timedelta(days=days * 2)
+        prev_end   = today - timedelta(days=days + 1)
+
+        try:
+            with self.connect() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+                    # 1. Projects where this TL is admin
+                    cur.execute("""
+                        SELECT p.id, p.name
+                        FROM projects p
+                        JOIN project_assignments pa ON p.id = pa.project_id
+                        WHERE pa.user_email = %s
+                          AND pa.role_on_project = 'admin'
+                          AND p.is_active = TRUE
+                        ORDER BY p.name
+                    """, (tl_email,))
+                    projects = [dict(r) for r in cur.fetchall()]
+
+                    result = []
+                    for proj in projects:
+                        pid  = proj['id']
+                        pname = proj['name']
+
+                        # 2. Developers assigned to this project
+                        cur.execute("""
+                            SELECT pa.user_email, u.name
+                            FROM project_assignments pa
+                            JOIN users u ON pa.user_email = u.email
+                            WHERE pa.project_id = %s
+                              AND u.role = 'developer'
+                              AND u.is_active = TRUE
+                        """, (pid,))
+                        assigned = [dict(r) for r in cur.fetchall()]
+                        if not assigned:
+                            continue
+
+                        dev_emails = [d['user_email'] for d in assigned]
+
+                        # 3. Current period aggregates per developer
+                        cur.execute("""
+                            SELECT user_email,
+                                   COALESCE(SUM(commits_count), 0)::int          AS commits,
+                                   COALESCE(SUM(issues_found),  0)::int          AS issues,
+                                   COALESCE(AVG(NULLIF(code_quality_score,0)),0) AS quality
+                            FROM developer_analytics
+                            WHERE project_id = %s
+                              AND date > %s
+                              AND user_email = ANY(%s)
+                            GROUP BY user_email
+                        """, (pid, curr_start, dev_emails))
+                        curr = {r['user_email']: dict(r) for r in cur.fetchall()}
+
+                        # 4. Previous period aggregates per developer
+                        cur.execute("""
+                            SELECT user_email,
+                                   COALESCE(SUM(commits_count), 0)::int          AS commits,
+                                   COALESCE(SUM(issues_found),  0)::int          AS issues,
+                                   COALESCE(AVG(NULLIF(code_quality_score,0)),0) AS quality
+                            FROM developer_analytics
+                            WHERE project_id = %s
+                              AND date > %s AND date <= %s
+                              AND user_email = ANY(%s)
+                            GROUP BY user_email
+                        """, (pid, prev_start, prev_end, dev_emails))
+                        prev = {r['user_email']: dict(r) for r in cur.fetchall()}
+
+                        # 5. Violations from project_scans (hook + admin)
+                        cur.execute("""
+                            SELECT violations_json, hook_violations_json,
+                                   quality_score, branch
+                            FROM project_scans
+                            WHERE project_id = %s
+                        """, (pid,))
+                        scans = [dict(r) for r in cur.fetchall()]
+
+                        all_violations: List[Dict] = []
+                        scan_scores: List[float] = []
+                        for s in scans:
+                            for col in ('violations_json', 'hook_violations_json'):
+                                raw = s.get(col) or []
+                                if isinstance(raw, str):
+                                    try: raw = _j.loads(raw)
+                                    except Exception: raw = []
+                                all_violations.extend(raw if isinstance(raw, list) else [])
+                            if s.get('quality_score'):
+                                scan_scores.append(float(s['quality_score']))
+
+                        proj_quality = round(sum(scan_scores)/len(scan_scores), 1) if scan_scores else 0.0
+
+                        # severity mapping
+                        _sev = {"error": "critical", "warning": "high", "info": "medium"}
+                        issue_details = []
+                        for v in all_violations[:30]:
+                            sev = v.get('severity', 'info')
+                            issue_details.append({
+                                "title":       v.get('rule_id') or v.get('category') or 'Issue',
+                                "file":        v.get('file', ''),
+                                "line":        v.get('line', ''),
+                                "severity":    _sev.get(sev, sev),
+                                "explanation": v.get('message', ''),
+                                "category":    v.get('category', ''),
+                            })
+
+                        # 6. Build developer list
+                        developers = []
+                        for dev in assigned:
+                            email = dev['user_email']
+                            c  = curr.get(email, {})
+                            p_ = prev.get(email, {})
+                            commits   = int(c.get('commits', 0))
+                            issues    = int(c.get('issues',  0))
+                            quality   = round(float(c.get('quality', 0)), 1)
+                            c_prev    = int(p_.get('commits', 0))
+                            i_prev    = int(p_.get('issues',  0))
+                            q_prev    = round(float(p_.get('quality', 0)), 1)
+                            developers.append({
+                                "name":           dev.get('name') or email,
+                                "email":          email,
+                                "commits":        commits,
+                                "commits_delta":  commits - c_prev,
+                                "issues":         issues,
+                                "issues_delta":   issues - i_prev,
+                                "quality_score":  quality,
+                                "quality_delta":  round(quality - q_prev, 1),
+                                "issue_details":  issue_details,
+                                # kept for backward compat with build_flat_payload
+                                "critical_count": sum(1 for i in issue_details if i['severity'] in ('critical','error')),
+                                "high_count":     sum(1 for i in issue_details if i['severity'] in ('high','warning')),
+                                "medium_count":   sum(1 for i in issue_details if i['severity'] == 'medium'),
+                                "low_count":      sum(1 for i in issue_details if i['severity'] == 'low'),
+                            })
+
+                        result.append({
+                            "project_name":   pname,
+                            "project_id":     pid,
+                            "quality_score":  proj_quality,
+                            "total_commits":  sum(d['commits'] for d in developers),
+                            "total_issues":   len(all_violations),
+                            "developers":     developers,
+                        })
+
+                    return result
+
+        except Exception as e:
+            print(f"[DB Error] get_tl_report_data: {e}")
+            import traceback; traceback.print_exc()
+            return []
+
     def queue_email_notification(self, recipient: str, subject: str, body: str, notification_type: str) -> bool:
         """Queue an email notification."""
         try:

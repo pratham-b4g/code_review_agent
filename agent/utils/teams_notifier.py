@@ -114,6 +114,14 @@ def build_flat_payload(
             details = dev.get("issue_details", [])
             c, h, m, l = _sev(details)
 
+            # delta indicators
+            cd = dev.get("commits_delta", 0)
+            id_ = dev.get("issues_delta", 0)
+            qd = dev.get("quality_delta", 0.0)
+            c_str = f" ({"↑" if cd > 0 else "↓" if cd < 0 else "→"}{abs(cd)} vs prev)" if cd != 0 else ""
+            i_str = f" ({"↑" if id_ > 0 else "↓" if id_ < 0 else "→"}{abs(id_)} vs prev)" if id_ != 0 else ""
+            q_str = f" ({"↑" if qd > 0 else "↓" if qd < 0 else "→"}{abs(qd)} vs prev)" if qd != 0.0 else ""
+
             dev_section_lines.append(f"\n👤 {name}")
 
             # list critical/high issues individually
@@ -142,9 +150,9 @@ def build_flat_payload(
             else:
                 dev_section_lines.append("✅ No critical issues today")
 
-            dev_section_lines.append(f"🟡 Medium: {m}  •  🟢 Low: {l}")
+            dev_section_lines.append(f"🟡 Medium: {m}  •  🟢 Low: {l}{i_str}")
             blocked_str = f"Blocked: {c} ⚠️" if c else "Blocked: 0"
-            dev_section_lines.append(f"📊 Commits: {commits}  •  {blocked_str}  •  Avg Score: {score10}/10")
+            dev_section_lines.append(f"📊 Commits: {commits}{c_str}  •  {blocked_str}  •  Avg Score: {score10}/10{q_str}")
             dev_section_lines.append("──────────────────────────")
 
     developer_sections = "\n".join(dev_section_lines)

@@ -152,7 +152,7 @@ def _should_fire(now_local: datetime, hhmm: tuple, last_sent,
 
 # ─── send logic ─────────────────────────────────────────────────────────────
 
-def _send_report_for(db, tracker, teams_mod, email_mod, tl: dict,
+def _send_report_for(db, tracker, teams_mod, email_mod, tl: dict,  # noqa: ARG001 tracker kept for signature compat
                      dashboard_url: str) -> bool:
     """Build analytics, send via Teams and/or email, mark success."""
     email = tl["email"]
@@ -160,11 +160,14 @@ def _send_report_for(db, tracker, teams_mod, email_mod, tl: dict,
     now_local = _now_in_tz(tz_name)
     frequency = tl.get("report_frequency") or "daily"
 
-    days = 7 if frequency == "daily" else (7 if frequency == "weekly" else 30)
+    # daily → compare today vs yesterday (days=1)
+    # weekly → compare this week vs last week (days=7)
+    # monthly → compare this month vs last month (days=30)
+    days = 1 if frequency == "daily" else (7 if frequency == "weekly" else 30)
 
-    projects_data = tracker.get_project_wise_summary(
-        tl_email=email, days=days, viewer_role="super_admin"
-    )
+    # Use DB-based analytics (developer_analytics table populated by hook_runner)
+    # instead of git — works even when repos aren't locally cloned.
+    projects_data = db.get_tl_report_data(email, days=days)
 
     date_label = now_local.strftime("%A, %d %b %Y")
     any_success = False
