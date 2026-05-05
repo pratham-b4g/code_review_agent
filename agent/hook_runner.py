@@ -454,6 +454,13 @@ def _post_review_to_server(
             repo_root=repo_root,
             result=result,
             critical_issues=critical_issues or [],
+            language=language,
+            framework=framework or "",
+            blocked=blocked,
+            security_issues=security_issues,
+            quality_issues=quality_issues,
+            style_issues=style_issues,
+            performance_issues=performance_issues,
         )
 
     except Exception:
@@ -466,12 +473,20 @@ def _save_scan_to_postgres(
     repo_root: Optional[str],
     result: "ReviewResult",
     critical_issues: list,
+    language: str = "",
+    framework: str = "",
+    blocked: bool = False,
+    security_issues: int = 0,
+    quality_issues: int = 0,
+    style_issues: int = 0,
+    performance_issues: int = 0,
 ) -> None:
     """Persist the full scan result (rule + AI violations) to PostgreSQL.
 
     Called from _post_review_to_server after the local SQLite save, so the
     admin panel always reflects what the developer sees in the terminal
     without needing to re-run the AI reviewer on every admin Review click.
+    Also writes one row to developer_reviews for accurate TL report data.
     """
     try:
         import subprocess as _sp
@@ -565,13 +580,38 @@ def _save_scan_to_postgres(
                 project_id=project_id,
                 date=_date.today(),
                 branch=branch,
-                commits_count=0,      # blocked — no commit happened
+                commits_count=0,
                 issues_found=total,
                 code_quality_score=quality_score,
                 effort_score=0,
+                blocked_commits=1 if blocked else 0,
             )
         except Exception as _ae:
             print(f"[CRA] analytics log failed (non-blocking): {_ae}")
+
+        # Save per-push-attempt record for TL reports (developer_reviews table).
+        # quality_score is stored as 0-10 (same scale as local SQLite).
+        try:
+            db.save_developer_review(
+                developer_email=developer_email,
+                project_id=project_id,
+                branch=branch,
+                language=language,
+                framework=framework,
+                quality_score=round(quality_score / 10.0, 1),
+                high_issues=errors,
+                medium_issues=warnings,
+                low_issues=max(0, total - errors - warnings),
+                blocked=blocked,
+                files_reviewed=result.files_scanned,
+                security_issues=security_issues,
+                quality_issues=quality_issues,
+                style_issues=style_issues,
+                performance_issues=performance_issues,
+                critical_issues=(critical_issues or [])[:20],
+            )
+        except Exception as _re:
+            print(f"[CRA] save_developer_review failed (non-blocking): {_re}")
 
         print(f"[CRA] Saved to PostgreSQL: {total} rule + {len(ai_violations)} AI violations")
     except Exception as _e:
@@ -658,8 +698,8 @@ def track_push_analytics():
             date=date.today(),
             branch=branch,
             commits_count=commit_count,
-            issues_found=0,  # Will be updated by full scan
-            code_quality_score=100,
+            issues_found=0,
+            code_quality_score=None,  # preserve score set by hook review
             effort_score=commit_count * 10
         )
         

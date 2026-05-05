@@ -215,6 +215,7 @@ class DatabaseManager:
                         files_changed INTEGER DEFAULT 0,
                         code_quality_score DECIMAL(5,2),
                         effort_score DECIMAL(5,2),
+                        blocked_commits INTEGER DEFAULT 0,
                         UNIQUE(user_email, project_id, branch, date)
                     )
                 """)
@@ -245,6 +246,15 @@ class DatabaseManager:
                 except Exception:
                     pass  # Column might already exist or other migration issues
 
+                # Migration: add blocked_commits column for existing databases
+                try:
+                    cur.execute("""
+                        ALTER TABLE developer_analytics
+                        ADD COLUMN IF NOT EXISTS blocked_commits INTEGER DEFAULT 0
+                    """)
+                except Exception:
+                    pass
+
                 # Project scan snapshots — one row per (project, branch); holds LATEST scan.
                 # Used for correct team analytics (no double-counting across branches).
                 cur.execute("""
@@ -264,6 +274,35 @@ class DatabaseManager:
                         hook_violations_json JSONB DEFAULT '[]'::jsonb,
                         PRIMARY KEY (project_id, branch)
                     )
+                """)
+
+                # Per-push-attempt review records — one row per push (blocked or allowed).
+                # Source of truth for scheduled TL reports. Never aggregated or overwritten.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS developer_reviews (
+                        id                   SERIAL PRIMARY KEY,
+                        developer_email      TEXT NOT NULL,
+                        project_id           INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                        branch               TEXT DEFAULT 'main',
+                        language             TEXT NOT NULL DEFAULT '',
+                        framework            TEXT,
+                        quality_score        DECIMAL(4,1),
+                        high_issues          INTEGER DEFAULT 0,
+                        medium_issues        INTEGER DEFAULT 0,
+                        low_issues           INTEGER DEFAULT 0,
+                        blocked              BOOLEAN DEFAULT FALSE,
+                        files_reviewed       INTEGER DEFAULT 0,
+                        security_issues      INTEGER DEFAULT 0,
+                        quality_issues       INTEGER DEFAULT 0,
+                        style_issues         INTEGER DEFAULT 0,
+                        performance_issues   INTEGER DEFAULT 0,
+                        critical_issues_json JSONB DEFAULT '[]'::jsonb,
+                        created_at           TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_devreviews_email_proj_date
+                    ON developer_reviews (developer_email, project_id, created_at)
                 """)
 
                 # Email notifications log
@@ -939,6 +978,51 @@ class DatabaseManager:
             print(f"[DB Error] get_project_scans: {e}")
             return []
 
+    def save_developer_review(
+        self,
+        developer_email: str,
+        project_id: int,
+        branch: str,
+        language: str,
+        framework: str,
+        quality_score: float,
+        high_issues: int,
+        medium_issues: int,
+        low_issues: int,
+        blocked: bool,
+        files_reviewed: int,
+        security_issues: int,
+        quality_issues: int,
+        style_issues: int,
+        performance_issues: int,
+        critical_issues: list,
+    ) -> bool:
+        """Insert one row per push attempt into developer_reviews.
+        Every push (blocked or allowed) gets its own row — never aggregated."""
+        import json as _j
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO developer_reviews
+                        (developer_email, project_id, branch, language, framework,
+                         quality_score, high_issues, medium_issues, low_issues,
+                         blocked, files_reviewed, security_issues, quality_issues,
+                         style_issues, performance_issues, critical_issues_json, created_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                    """, (
+                        developer_email, project_id, branch, language or '', framework or '',
+                        quality_score, high_issues, medium_issues, low_issues,
+                        blocked, files_reviewed, security_issues, quality_issues,
+                        style_issues, performance_issues,
+                        _j.dumps(critical_issues) if critical_issues else '[]',
+                    ))
+                    conn.commit()
+                    return True
+        except Exception as e:
+            print(f"[DB Error] save_developer_review: {e}")
+            return False
+
     def log_analytics(self, user_email: str, project_id: int, date: date, **metrics) -> bool:
         """Log or update daily analytics for a developer."""
         try:
@@ -954,36 +1038,40 @@ class DatabaseManager:
                     files_changed = metrics.get('files_changed', 0)
                     quality_score = metrics.get('code_quality_score', None)
                     effort_score = metrics.get('effort_score', None)
+                    blocked = metrics.get('blocked_commits', 0)
 
                     # Insert or update (upsert) - now includes branch
-                    # For scans (commits_count=0), replace the daily value instead of accumulating
+                    # For scans (commits_count=0), replace the daily value instead of accumulating.
+                    # blocked_commits always accumulates regardless of commits_count.
+                    # code_quality_score uses COALESCE so a NULL incoming value never overwrites a real score.
                     cur.execute("""
                         INSERT INTO developer_analytics
                         (user_email, project_id, branch, date, commits_count, lines_added, lines_removed,
-                         issues_found, bugs_fixed, files_changed, code_quality_score, effort_score)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         issues_found, bugs_fixed, files_changed, code_quality_score, effort_score, blocked_commits)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (user_email, project_id, branch, date)
                         DO UPDATE SET
-                            commits_count = CASE WHEN EXCLUDED.commits_count = 0 
-                                THEN developer_analytics.commits_count 
+                            commits_count = CASE WHEN EXCLUDED.commits_count = 0
+                                THEN developer_analytics.commits_count
                                 ELSE developer_analytics.commits_count + EXCLUDED.commits_count END,
-                            lines_added = CASE WHEN EXCLUDED.commits_count = 0 
-                                THEN EXCLUDED.lines_added 
+                            lines_added = CASE WHEN EXCLUDED.commits_count = 0
+                                THEN EXCLUDED.lines_added
                                 ELSE developer_analytics.lines_added + EXCLUDED.lines_added END,
-                            lines_removed = CASE WHEN EXCLUDED.commits_count = 0 
-                                THEN EXCLUDED.lines_removed 
+                            lines_removed = CASE WHEN EXCLUDED.commits_count = 0
+                                THEN EXCLUDED.lines_removed
                                 ELSE developer_analytics.lines_removed + EXCLUDED.lines_removed END,
-                            issues_found = CASE WHEN EXCLUDED.commits_count = 0 
-                                THEN EXCLUDED.issues_found 
+                            issues_found = CASE WHEN EXCLUDED.commits_count = 0
+                                THEN EXCLUDED.issues_found
                                 ELSE developer_analytics.issues_found + EXCLUDED.issues_found END,
                             bugs_fixed = developer_analytics.bugs_fixed + EXCLUDED.bugs_fixed,
-                            files_changed = CASE WHEN EXCLUDED.commits_count = 0 
-                                THEN EXCLUDED.files_changed 
+                            files_changed = CASE WHEN EXCLUDED.commits_count = 0
+                                THEN EXCLUDED.files_changed
                                 ELSE developer_analytics.files_changed + EXCLUDED.files_changed END,
-                            code_quality_score = EXCLUDED.code_quality_score,
-                            effort_score = EXCLUDED.effort_score
+                            code_quality_score = COALESCE(EXCLUDED.code_quality_score, developer_analytics.code_quality_score),
+                            effort_score = EXCLUDED.effort_score,
+                            blocked_commits = developer_analytics.blocked_commits + EXCLUDED.blocked_commits
                     """, (user_email, project_id, branch, date, commits, lines_added, lines_removed,
-                          issues, bugs_fixed, files_changed, quality_score, effort_score))
+                          issues, bugs_fixed, files_changed, quality_score, effort_score, blocked))
                     conn.commit()
                     return True
         except Exception as e:
@@ -1027,63 +1115,59 @@ class DatabaseManager:
                 return [dict(row) for row in cur.fetchall()]
 
     def get_tl_report_data(self, tl_email: str, days: int = 1) -> List[Dict[str, Any]]:
-        """Return per-project, per-developer report data for scheduled reports.
+        """Return per-project, per-developer report data for scheduled TL reports.
 
-        Uses developer_analytics (populated by hook_runner on every commit/block)
-        instead of git, so it works even when repos aren't locally cloned.
-
-        For each developer returns:
-          commits / issues / quality_score for the current period
-          commits_delta / issues_delta / quality_delta vs the previous same-length period
-          issue_details from project_scans violations (hook + admin scan)
+        Reads from developer_reviews (one row per push attempt) — same data model as
+        the local SQLite store, so commit counts, blocked counts, category breakdowns,
+        and trends are all accurate and identical in format to the local report.
         """
         import json as _j
-        from datetime import timedelta
-        today = date.today()
-        curr_start = today - timedelta(days=days)
-        prev_start = today - timedelta(days=days * 2)
-        prev_end   = today - timedelta(days=days + 1)
+        from datetime import timedelta, timezone as _tz
+
+        now_utc    = datetime.utcnow().replace(tzinfo=_tz.utc)
+        curr_start = now_utc - timedelta(days=days)
+        prev_start = now_utc - timedelta(days=days * 2)
+        prev_end   = curr_start
+
+        def _grade(s):
+            if s >= 9:   return "A (Excellent)"
+            if s >= 8:   return "B (Good)"
+            if s >= 7:   return "C (Average)"
+            return "D (Needs Improvement)"
 
         try:
             with self.connect() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
-                    # 1. Get TL's role in users table
+                    # 1. TL role
                     cur.execute("SELECT role FROM users WHERE email = %s", (tl_email,))
-                    tl_row = cur.fetchone()
+                    tl_row  = cur.fetchone()
                     tl_role = (tl_row['role'] if tl_row else '') or ''
                     print(f"[Report] get_tl_report_data: tl={tl_email} role={tl_role}")
 
-                    # super_admin sees all projects; admin/tl sees only assigned projects
+                    # 2. Projects visible to this TL
                     if tl_role == 'super_admin':
-                        cur.execute("""
-                            SELECT id, name FROM projects
-                            WHERE is_active = TRUE ORDER BY name
-                        """)
+                        cur.execute("SELECT id, name FROM projects WHERE is_active = TRUE ORDER BY name")
                     else:
                         cur.execute("""
-                            SELECT p.id, p.name
-                            FROM projects p
+                            SELECT p.id, p.name FROM projects p
                             JOIN project_assignments pa ON p.id = pa.project_id
-                            WHERE pa.user_email = %s AND p.is_active = TRUE
-                            ORDER BY p.name
+                            WHERE pa.user_email = %s AND p.is_active = TRUE ORDER BY p.name
                         """, (tl_email,))
                     projects = [dict(r) for r in cur.fetchall()]
                     print(f"[Report] found {len(projects)} project(s): {[p['name'] for p in projects]}")
 
                     result = []
                     for proj in projects:
-                        pid  = proj['id']
+                        pid   = proj['id']
                         pname = proj['name']
 
-                        # 2. All users assigned to this project (excluding the TL themselves)
+                        # 3. Assigned developers (excluding the TL themselves)
                         cur.execute("""
-                            SELECT pa.user_email, u.name, u.role
+                            SELECT pa.user_email, u.name
                             FROM project_assignments pa
                             JOIN users u ON pa.user_email = u.email
-                            WHERE pa.project_id = %s
-                              AND u.is_active = TRUE
-                              AND pa.user_email != %s
+                            WHERE pa.project_id = %s AND u.is_active = TRUE AND pa.user_email != %s
                         """, (pid, tl_email))
                         assigned = [dict(r) for r in cur.fetchall()]
                         if not assigned:
@@ -1091,107 +1175,122 @@ class DatabaseManager:
 
                         dev_emails = [d['user_email'] for d in assigned]
 
-                        # 3. Current period aggregates per developer
+                        # 4. Current-period aggregates per developer from developer_reviews
                         cur.execute("""
-                            SELECT user_email,
-                                   COALESCE(SUM(commits_count), 0)::int          AS commits,
-                                   COALESCE(SUM(issues_found),  0)::int          AS issues,
-                                   COALESCE(AVG(NULLIF(code_quality_score,0)),0) AS quality
-                            FROM developer_analytics
-                            WHERE project_id = %s
-                              AND date > %s
-                              AND user_email = ANY(%s)
-                            GROUP BY user_email
-                        """, (pid, curr_start, dev_emails))
-                        curr = {r['user_email']: dict(r) for r in cur.fetchall()}
+                            SELECT developer_email,
+                                   COUNT(*)::int                                AS total_commits,
+                                   COUNT(*) FILTER (WHERE blocked)::int         AS blocked_commits,
+                                   COALESCE(AVG(NULLIF(quality_score,0)), 0)    AS avg_score,
+                                   COALESCE(SUM(high_issues),         0)::int   AS high_issues,
+                                   COALESCE(SUM(medium_issues),       0)::int   AS medium_issues,
+                                   COALESCE(SUM(low_issues),          0)::int   AS low_issues,
+                                   COALESCE(SUM(security_issues),     0)::int   AS security_issues,
+                                   COALESCE(SUM(quality_issues),      0)::int   AS quality_issues,
+                                   COALESCE(SUM(style_issues),        0)::int   AS style_issues,
+                                   COALESCE(SUM(performance_issues),  0)::int   AS performance_issues
+                            FROM developer_reviews
+                            WHERE project_id = %s AND developer_email = ANY(%s) AND created_at > %s
+                            GROUP BY developer_email
+                        """, (pid, dev_emails, curr_start))
+                        curr = {r['developer_email']: dict(r) for r in cur.fetchall()}
 
-                        # 4. Previous period aggregates per developer
+                        # 5. Previous-period aggregates (for trends)
                         cur.execute("""
-                            SELECT user_email,
-                                   COALESCE(SUM(commits_count), 0)::int          AS commits,
-                                   COALESCE(SUM(issues_found),  0)::int          AS issues,
-                                   COALESCE(AVG(NULLIF(code_quality_score,0)),0) AS quality
-                            FROM developer_analytics
-                            WHERE project_id = %s
-                              AND date > %s AND date <= %s
-                              AND user_email = ANY(%s)
-                            GROUP BY user_email
-                        """, (pid, prev_start, prev_end, dev_emails))
-                        prev = {r['user_email']: dict(r) for r in cur.fetchall()}
+                            SELECT developer_email,
+                                   COUNT(*)::int                                AS total_commits,
+                                   COUNT(*) FILTER (WHERE blocked)::int         AS blocked_commits,
+                                   COALESCE(AVG(NULLIF(quality_score,0)), 0)    AS avg_score,
+                                   COALESCE(SUM(high_issues),   0)::int         AS high_issues,
+                                   COALESCE(SUM(medium_issues), 0)::int         AS medium_issues,
+                                   COALESCE(SUM(low_issues),    0)::int         AS low_issues
+                            FROM developer_reviews
+                            WHERE project_id = %s AND developer_email = ANY(%s)
+                              AND created_at > %s AND created_at <= %s
+                            GROUP BY developer_email
+                        """, (pid, dev_emails, prev_start, prev_end))
+                        prev = {r['developer_email']: dict(r) for r in cur.fetchall()}
 
-                        # 5. Violations from project_scans (hook + admin)
+                        # 6. Critical issues — combine all rows' JSON arrays per developer
                         cur.execute("""
-                            SELECT violations_json, hook_violations_json,
-                                   quality_score, branch
-                            FROM project_scans
-                            WHERE project_id = %s
-                        """, (pid,))
-                        scans = [dict(r) for r in cur.fetchall()]
+                            SELECT developer_email, critical_issues_json
+                            FROM developer_reviews
+                            WHERE project_id = %s AND developer_email = ANY(%s) AND created_at > %s
+                              AND critical_issues_json IS NOT NULL
+                              AND jsonb_array_length(critical_issues_json) > 0
+                        """, (pid, dev_emails, curr_start))
+                        dev_critical: Dict[str, list] = {}
+                        for row in cur.fetchall():
+                            email = row['developer_email']
+                            raw   = row['critical_issues_json']
+                            if isinstance(raw, str):
+                                try: raw = _j.loads(raw)
+                                except Exception: raw = []
+                            issues = raw if isinstance(raw, list) else []
+                            dev_critical.setdefault(email, []).extend(issues)
 
-                        all_violations: List[Dict] = []
-                        scan_scores: List[float] = []
-                        for s in scans:
-                            for col in ('violations_json', 'hook_violations_json'):
-                                raw = s.get(col) or []
-                                if isinstance(raw, str):
-                                    try: raw = _j.loads(raw)
-                                    except Exception: raw = []
-                                all_violations.extend(raw if isinstance(raw, list) else [])
-                            if s.get('quality_score'):
-                                scan_scores.append(float(s['quality_score']))
-
-                        proj_quality = round(sum(scan_scores)/len(scan_scores), 1) if scan_scores else 0.0
-
-                        # severity mapping
-                        _sev = {"error": "critical", "warning": "high", "info": "medium"}
-                        issue_details = []
-                        for v in all_violations[:30]:
-                            sev = v.get('severity', 'info')
-                            issue_details.append({
-                                "title":       v.get('rule_id') or v.get('category') or 'Issue',
-                                "file":        v.get('file', ''),
-                                "line":        v.get('line', ''),
-                                "severity":    _sev.get(sev, sev),
-                                "explanation": v.get('message', ''),
-                                "category":    v.get('category', ''),
-                            })
-
-                        # 6. Build developer list
+                        # 7. Build developer list
                         developers = []
                         for dev in assigned:
-                            email = dev['user_email']
-                            c  = curr.get(email, {})
-                            p_ = prev.get(email, {})
-                            commits   = int(c.get('commits', 0))
-                            issues    = int(c.get('issues',  0))
-                            quality   = round(float(c.get('quality', 0)), 1)
-                            c_prev    = int(p_.get('commits', 0))
-                            i_prev    = int(p_.get('issues',  0))
-                            q_prev    = round(float(p_.get('quality', 0)), 1)
+                            email  = dev['user_email']
+                            c      = curr.get(email, {})
+                            p_     = prev.get(email, {})
+
+                            total_commits      = int(c.get('total_commits',      0))
+                            blocked_commits    = int(c.get('blocked_commits',    0))
+                            avg_score          = round(float(c.get('avg_score',  0)), 1)
+                            high_issues        = int(c.get('high_issues',        0))
+                            medium_issues      = int(c.get('medium_issues',      0))
+                            low_issues         = int(c.get('low_issues',         0))
+                            security_issues    = int(c.get('security_issues',    0))
+                            quality_issues     = int(c.get('quality_issues',     0))
+                            style_issues       = int(c.get('style_issues',       0))
+                            performance_issues = int(c.get('performance_issues', 0))
+                            critical_issues    = dev_critical.get(email, [])[:20]
+
+                            p_commits  = int(p_.get('total_commits',   0))
+                            p_blocked  = int(p_.get('blocked_commits', 0))
+                            p_score    = round(float(p_.get('avg_score', 0)), 1)
+                            p_high     = int(p_.get('high_issues',     0))
+                            p_medium   = int(p_.get('medium_issues',   0))
+                            p_low      = int(p_.get('low_issues',      0))
+
                             developers.append({
-                                "name":           dev.get('name') or email,
-                                "email":          email,
-                                "commits":        commits,
-                                "commits_delta":  commits - c_prev,
-                                "issues":         issues,
-                                "issues_delta":   issues - i_prev,
-                                "quality_score":  quality,
-                                "quality_delta":  round(quality - q_prev, 1),
-                                "issue_details":  issue_details,
-                                # kept for backward compat with build_flat_payload
-                                "critical_count": sum(1 for i in issue_details if i['severity'] in ('critical','error')),
-                                "high_count":     sum(1 for i in issue_details if i['severity'] in ('high','warning')),
-                                "medium_count":   sum(1 for i in issue_details if i['severity'] == 'medium'),
-                                "low_count":      sum(1 for i in issue_details if i['severity'] == 'low'),
+                                "name":               dev.get('name') or email,
+                                "email":              email,
+                                "total_commits":      total_commits,
+                                "blocked_commits":    blocked_commits,
+                                "avg_score":          avg_score,
+                                "quality_grade":      _grade(avg_score),
+                                "high_issues":        high_issues,
+                                "medium_issues":      medium_issues,
+                                "low_issues":         low_issues,
+                                "security_issues":    security_issues,
+                                "quality_issues":     quality_issues,
+                                "style_issues":       style_issues,
+                                "performance_issues": performance_issues,
+                                "critical_issues":    critical_issues,
+                                "commits_delta":      total_commits   - p_commits,
+                                "blocked_delta":      blocked_commits - p_blocked,
+                                "score_delta":        round(avg_score - p_score, 1),
+                                "high_delta":         high_issues     - p_high,
+                                "medium_delta":       medium_issues   - p_medium,
+                                "low_delta":          low_issues      - p_low,
                             })
 
+                        if not developers:
+                            continue
+
+                        proj_scores = [d['avg_score'] for d in developers if d['avg_score']]
                         result.append({
-                            "project_name":   pname,
-                            "project_id":     pid,
-                            "quality_score":  proj_quality,
-                            "total_commits":  sum(d['commits'] for d in developers),
-                            "total_issues":   len(all_violations),
-                            "developers":     developers,
+                            "project_name":    pname,
+                            "project_id":      pid,
+                            "total_commits":   sum(d['total_commits']   for d in developers),
+                            "blocked_commits": sum(d['blocked_commits'] for d in developers),
+                            "total_issues":    sum(d['high_issues'] + d['medium_issues'] + d['low_issues']
+                                                   for d in developers),
+                            "quality_score":   round(sum(proj_scores) / len(proj_scores), 1)
+                                               if proj_scores else 0.0,
+                            "developers":      developers,
                         })
 
                     return result
