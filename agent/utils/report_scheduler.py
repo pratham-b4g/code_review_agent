@@ -129,13 +129,12 @@ def _send_report_for(db, tracker, teams_mod, email_mod, tl: dict,
     webhook_url = tl.get("teams_webhook_url") or ""
     if webhook_url:
         try:
-            report_payload = teams_mod.build_project_wise_report(
+            report_payload = teams_mod.build_flat_payload(
                 projects_data=projects_data,
                 tl_name=tl.get("name") or email,
                 tl_email=email,
                 date_label=date_label,
                 report_type=frequency,
-                dashboard_url=dashboard_url,
             )
             result = teams_mod.post_to_teams(webhook_url, report_payload)
             if result.get("ok"):

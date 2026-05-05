@@ -377,6 +377,159 @@ def build_adaptive_card(summary: Dict[str, Any],
     )
 
 
+def build_flat_payload(
+    projects_data: List[Dict[str, Any]],
+    tl_name: str,
+    tl_email: str,
+    date_label: str,
+    report_type: str = "daily",
+) -> Dict[str, Any]:
+    """Build flat data payload matching Power Automate Parse JSON schema.
+
+    Fields match the schema exactly so Power Automate can read them directly
+    from triggerBody() and build / route the card without null failures.
+    """
+    project_names = ", ".join(p.get("project_name", "") for p in projects_data) or "No projects"
+
+    # Aggregate totals
+    total_commits = sum(p.get("total_commits", 0) for p in projects_data)
+    blocked_commits = sum(p.get("blocked_commits", 0) for p in projects_data)
+    if total_commits > 0:
+        success_pct = round((total_commits - blocked_commits) / total_commits * 100)
+        success_rate = f"{success_pct}%"
+    else:
+        success_rate = "N/A"
+
+    # Average quality score across all projects
+    scores = [p.get("quality_score", 0) for p in projects_data if p.get("quality_score")]
+    avg_score = round(sum(scores) / len(scores), 1) if scores else 0.0
+    if avg_score >= 90:
+        quality_grade = "A"
+    elif avg_score >= 80:
+        quality_grade = "B"
+    elif avg_score >= 70:
+        quality_grade = "C"
+    elif avg_score >= 60:
+        quality_grade = "D"
+    else:
+        quality_grade = "F"
+
+    # Flatten all developers across projects
+    all_devs: List[Dict] = []
+    for p in projects_data:
+        all_devs.extend(p.get("developers", []))
+
+    # Developer breakdown — one line per dev
+    dev_lines = []
+    for d in all_devs[:15]:
+        name = d.get("name") or d.get("email") or "Unknown"
+        commits = d.get("commits", 0)
+        issues = d.get("issues", 0)
+        score = d.get("quality_score", 0)
+        dev_lines.append(f"{name}: {commits} commits, {issues} issues, {score}% quality")
+    developer_breakdown = "\n".join(dev_lines) if dev_lines else "No developer data"
+
+    # Top performers (score >= 70) and needs coaching (score < 60)
+    sorted_devs = sorted(all_devs, key=lambda d: d.get("quality_score", 0) or 0, reverse=True)
+    top_performers = ", ".join(
+        d.get("name") or d.get("email", "?")
+        for d in sorted_devs[:5]
+        if (d.get("quality_score") or 0) >= 70
+    ) or "None"
+    needs_coaching = ", ".join(
+        d.get("name") or d.get("email", "?")
+        for d in sorted_devs[::-1][:5]
+        if (d.get("quality_score") or 0) < 60
+    ) or "None"
+
+    # Aggregate severity across all branches in all projects
+    severity_totals: Dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for p in projects_data:
+        for b in p.get("branches", []):
+            for k, v in b.get("severity_breakdown", {}).items():
+                severity_totals[k] = severity_totals.get(k, 0) + int(v or 0)
+
+    top_violations = (
+        f"Critical: {severity_totals['critical']}, "
+        f"High: {severity_totals['high']}, "
+        f"Medium: {severity_totals['medium']}, "
+        f"Low: {severity_totals['low']}"
+    )
+
+    # Critical issues list — titles from developers' issue_details
+    crit_lines = []
+    for d in all_devs:
+        name = d.get("name") or d.get("email") or "Dev"
+        for issue in d.get("issue_details", []):
+            if issue.get("severity") in ("critical", "error"):
+                title = issue.get("title", "Issue")
+                fname = issue.get("file", "")
+                crit_lines.append(f"{name} — {title} ({fname})")
+                if len(crit_lines) >= 20:
+                    break
+        if len(crit_lines) >= 20:
+            break
+    critical_issues_list = "\n".join(crit_lines) if crit_lines else "No critical issues"
+
+    # Per-developer sections (richer text)
+    sections = []
+    for p in projects_data:
+        sections.append(f"=== {p.get('project_name', 'Project')} ===")
+        for d in p.get("developers", []):
+            name = d.get("name") or d.get("email") or "Dev"
+            commits = d.get("commits", 0)
+            issues = d.get("issues", 0)
+            score = d.get("quality_score", 0)
+            hours = d.get("productive_hours", 0)
+            sections.append(f"{name}: {commits} commits | {issues} issues | {score}% | {hours}h")
+    developer_sections = "\n".join(sections) if sections else "No data"
+
+    # Action items
+    action_list = []
+    if severity_totals["critical"] > 0:
+        action_list.append(f"Fix {severity_totals['critical']} critical issue(s) immediately")
+    if needs_coaching and needs_coaching != "None":
+        action_list.append(f"Schedule code review coaching for: {needs_coaching}")
+    if avg_score < 70:
+        action_list.append("Team quality below 70% — review coding standards")
+    if not action_list:
+        action_list.append("Maintain current code quality standards")
+    action_items = "\n".join(f"• {a}" for a in action_list)
+
+    # Trend labels (simple heuristic — stable unless we have history)
+    commit_trend = "→ Stable"
+    blocked_trend = "→ Stable"
+    improving = "Yes" if avg_score >= 70 else "No"
+
+    issues_trend_summary = (
+        f"Grade: {quality_grade} ({avg_score}% avg quality). "
+        f"{severity_totals['critical']} critical, {severity_totals['high']} high issues. "
+        f"{blocked_commits} blocked / {total_commits} total commits."
+    )
+
+    return {
+        "project": project_names,
+        "week": date_label,
+        "target_email": tl_email,
+        "total_commits": total_commits,
+        "blocked_commits": blocked_commits,
+        "success_rate": success_rate,
+        "avg_score": avg_score,
+        "quality_grade": quality_grade,
+        "commit_trend": commit_trend,
+        "blocked_trend": blocked_trend,
+        "improving": improving,
+        "top_violations": top_violations,
+        "developer_breakdown": developer_breakdown,
+        "top_performers": top_performers,
+        "needs_coaching": needs_coaching,
+        "action_items": action_items,
+        "critical_issues_list": critical_issues_list,
+        "developer_sections": developer_sections,
+        "issues_trend_summary": issues_trend_summary,
+    }
+
+
 def post_to_teams(webhook_url: str, payload: Dict[str, Any], timeout: float = 15.0) -> Dict[str, Any]:
     """POST the payload to a Power Automate webhook.
 
