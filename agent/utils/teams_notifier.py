@@ -1,10 +1,6 @@
-"""Microsoft Teams report delivery via Power Automate webhooks.
-
-Project-wise detailed reports with severity breakdown and expandable sections.
-"""
+"""Microsoft Teams report delivery via Power Automate webhooks."""
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, List, Optional
 
 try:
@@ -12,565 +8,341 @@ try:
 except Exception:
     requests = None  # type: ignore[assignment]
 
-# Severity colors for Teams Adaptive Cards
-SEVERITY_COLORS = {
-    "critical": "Attention",  # Red
-    "high": "Warning",        # Orange
-    "medium": "Accent",       # Blue
-    "low": "Good",           # Green
-    "error": "Attention",
-    "warning": "Warning",
-    "info": "Accent",
-}
+
+def _grade(score: float) -> tuple:
+    """Return (letter, label, AC-color) from a 0-100 quality score."""
+    if score >= 90: return "A", "Excellent", "Good"
+    if score >= 80: return "B", "Good",      "Good"
+    if score >= 70: return "C", "Average",   "Warning"
+    if score >= 60: return "D", "Below Avg", "Warning"
+    return "F", "Poor", "Attention"
 
 
-def build_project_wise_report(
-    projects_data: List[Dict[str, Any]],
-    tl_name: str,
-    tl_email: str,
-    date_label: str,
-    report_type: str = "daily",  # "daily" or "monthly"
-    dashboard_url: str = "http://localhost:9090"
-) -> Dict[str, Any]:
-    """Build project-wise detailed report with severity breakdown.
-
-    Each project section includes:
-    - Project name (centered)
-    - Branch list with issue counts
-    - Severity breakdown (Critical, High, Medium, Low)
-    - Developer assignments with branch details
-    - Expandable issue lists
-    """
-    card_body = []
-
-    # Header
-    title = "📊 Code Review Agent — Monthly Report" if report_type == "monthly" else "📊 Code Review Agent — Daily Report"
-    card_body.append({
-        "type": "TextBlock",
-        "text": title,
-        "weight": "Bolder",
-        "size": "Large",
-        "color": "Accent",
-        "horizontalAlignment": "Center"
-    })
-    card_body.append({
-        "type": "TextBlock",
-        "text": f"Hi {tl_name}, here's your {report_type} summary for **{date_label}**.",
-        "wrap": True,
-        "spacing": "Small",
-        "isSubtle": True,
-        "horizontalAlignment": "Center"
-    })
-
-    # Overall summary (for monthly reports)
-    if report_type == "monthly":
-        total_commits = sum(p.get("total_commits", 0) for p in projects_data)
-        total_issues = sum(p.get("total_issues", 0) for p in projects_data)
-        card_body.append({
-            "type": "Container",
-            "style": "emphasis",
-            "items": [{
-                "type": "FactSet",
-                "facts": [
-                    {"title": "Total Projects", "value": str(len(projects_data))},
-                    {"title": "Monthly Commits", "value": str(total_commits)},
-                    {"title": "Total Open Issues", "value": str(total_issues)},
-                ]
-            }],
-            "spacing": "Medium"
-        })
-
-    # Per-project sections
-    for project in projects_data:
-        proj_name = project.get("project_name", "Unknown Project")
-        proj_id = project.get("project_id", 0)
-
-        # Project header with centered name
-        card_body.append({
-            "type": "Container",
-            "style": "emphasis",
-            "items": [{
-                "type": "TextBlock",
-                "text": f"🏢 {proj_name}",
-                "weight": "Bolder",
-                "size": "Medium",
-                "horizontalAlignment": "Center",
-                "color": "Accent"
-            }],
-            "spacing": "Large"
-        })
-
-        # Branches summary
-        branches = project.get("branches", [])
-        if branches:
-            branch_texts = []
-            for b in branches:
-                name = b.get("branch", "unknown")
-                issues = b.get("issues", 0)
-                current = "✓" if b.get("is_current") else ""
-                branch_texts.append(f"`{name}`:{issues}{current}")
-
-            card_body.append({
-                "type": "TextBlock",
-                "text": "Branches: " + " · ".join(branch_texts[:6]),
-                "wrap": True,
-                "size": "Small",
-                "isSubtle": True
-            })
-
-        # Severity breakdown - use project quality score (average of branches)
-        develop_branch = next((b for b in branches if b.get("branch") in ["develop", "main", "master"]), None)
-        if develop_branch:
-            severity = develop_branch.get("severity_breakdown", {})
-            critical = severity.get("critical", 0)
-            high = severity.get("high", 0)
-            medium = severity.get("medium", 0)
-            low = severity.get("low", 0)
-            # Use project-level quality score (calculated as average of all branches)
-            quality = project.get("quality_score", develop_branch.get("quality_score", 0))
-
-            card_body.append({
-                "type": "FactSet",
-                "facts": [
-                    {"title": "Quality Score", "value": f"{quality}%"},
-                    {"title": "🔴 Critical", "value": str(critical)},
-                    {"title": "🟠 High", "value": str(high)},
-                    {"title": "🔵 Medium", "value": str(medium)},
-                    {"title": "🟢 Low", "value": str(low)},
-                ],
-                "spacing": "Small"
-            })
-
-        # Developers assigned to this project
-        developers = project.get("developers", [])
-        if developers:
-            card_body.append({
-                "type": "TextBlock",
-                "text": "👥 Developers",
-                "weight": "Bolder",
-                "size": "Small",
-                "spacing": "Medium"
-            })
-
-            for dev in developers:
-                dev_name = dev.get("name", dev.get("email", "Unknown"))
-                dev_branch = dev.get("branch", "develop")
-                dev_commits = dev.get("commits", 0)
-                dev_issues = dev.get("issues", 0)
-                dev_quality = dev.get("quality_score", 0)
-                productive_hours = dev.get("productive_hours", 0)
-                extra_hours = dev.get("extra_hours", 0)
-
-                # Developer card with expandable details
-                dev_container = {
-                    "type": "Container",
-                    "style": "default",
-                    "items": [
-                        {
-                            "type": "ColumnSet",
-                            "columns": [
-                                {
-                                    "type": "Column",
-                                    "width": "stretch",
-                                    "items": [{
-                                        "type": "TextBlock",
-                                        "text": f"**{dev_name}** ({dev_branch})",
-                                        "weight": "Bolder",
-                                        "size": "Small"
-                                    }]
-                                },
-                                {
-                                    "type": "Column",
-                                    "width": "auto",
-                                    "items": [{
-                                        "type": "TextBlock",
-                                        "text": f"{dev_commits} commits",
-                                        "size": "Small",
-                                        "isSubtle": True
-                                    }]
-                                }
-                            ]
-                        },
-                        {
-                            "type": "FactSet",
-                            "facts": [
-                                {"title": "Issues", "value": str(dev_issues)},
-                                {"title": "Quality", "value": f"{dev_quality}%"},
-                                {"title": "⏱️ Productive Hours", "value": str(productive_hours)},
-                                {"title": "⏰ Extra Hours", "value": str(extra_hours) if extra_hours > 0 else "None"},
-                            ],
-                            "spacing": "Small"
-                        }
-                    ],
-                    "spacing": "Small"
-                }
-
-                # Add expandable issue details if there are critical/high issues
-                critical_count = dev.get("critical_count", 0)
-                high_count = dev.get("high_count", 0)
-                medium_count = dev.get("medium_count", 0)
-                low_count = dev.get("low_count", 0)
-                total_severity_issues = critical_count + high_count + medium_count + low_count
-
-                issue_details = dev.get("issue_details", [])
-
-                if total_severity_issues > 0:
-                    issue_items = []
-
-                    # Header showing breakdown
-                    issue_items.append({
-                        "type": "TextBlock",
-                        "text": f"**Issue Breakdown:** 🔴{critical_count} 🟠{high_count} 🔵{medium_count} 🟢{low_count}",
-                        "size": "Small",
-                        "weight": "Bolder",
-                        "spacing": "Small"
-                    })
-                    issue_items.append({"type": "TextBlock", "text": "", "spacing": "Small"})
-
-                    # Show actual issue details with explanations
-                    for detail in issue_details[:10]:  # Show top 10 issues
-                        severity = detail.get("severity", "info")
-                        color = SEVERITY_COLORS.get(severity, "Default")
-                        emoji = "🔴" if severity == "critical" else "🟠" if severity == "high" else "🔵" if severity == "medium" else "🟢"
-
-                        issue_container = {
-                            "type": "Container",
-                            "style": "emphasis" if severity in ["critical", "high"] else "default",
-                            "items": [
-                                {
-                                    "type": "TextBlock",
-                                    "text": f"{emoji} **{detail.get('title', 'Issue')}**",
-                                    "size": "Small",
-                                    "weight": "Bolder",
-                                    "color": color,
-                                    "wrap": True
-                                },
-                                {
-                                    "type": "TextBlock",
-                                    "text": f"📁 File: `{detail.get('file', 'unknown')}`",
-                                    "size": "Small",
-                                    "isSubtle": True,
-                                    "wrap": True
-                                }
-                            ],
-                            "spacing": "Small"
-                        }
-
-                        # Add explanation if available
-                        if detail.get("explanation"):
-                            issue_container["items"].append({
-                                "type": "TextBlock",
-                                "text": f"� **Why:** {detail.get('explanation')}",
-                                "size": "Small",
-                                "wrap": True
-                            })
-
-                        # Add fix suggestion if available
-                        if detail.get("fix"):
-                            issue_container["items"].append({
-                                "type": "TextBlock",
-                                "text": f"🔧 **Fix:** {detail.get('fix')}",
-                                "size": "Small",
-                                "color": "Good",
-                                "wrap": True
-                            })
-
-                        issue_items.append(issue_container)
-
-                    # Show message if more issues exist
-                    if len(issue_details) > 10:
-                        issue_items.append({
-                            "type": "TextBlock",
-                            "text": f"... and {len(issue_details) - 10} more issues. View full details in dashboard.",
-                            "size": "Small",
-                            "isSubtle": True,
-                            "italic": True
-                        })
-
-                    dev_container["items"].append({
-                        "type": "ActionSet",
-                        "actions": [{
-                            "type": "Action.ShowCard",
-                            "title": f"⚠️ View {total_severity_issues} Issues",
-                            "card": {
-                                "type": "AdaptiveCard",
-                                "body": issue_items,
-                                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                                "version": "1.4"
-                            }
-                        }],
-                        "spacing": "Small"
-                    })
-
-                card_body.append(dev_container)
-
-        # Separator between projects
-        card_body.append({"type": "TextBlock", "text": "", "spacing": "Large"})
-
-    # Footer actions
-    card = {
-        "type": "AdaptiveCard",
-        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-        "version": "1.4",
-        "msteams": {"width": "Full"},
-        "body": card_body,
-        "actions": [
-            {
-                "type": "Action.OpenUrl",
-                "title": "📊 Open Dashboard",
-                "url": dashboard_url,
-            },
-        ],
-    }
-
-    return {
-        "recipient": tl_email,
-        "recipient_name": tl_name,
-        "date": date_label,
-        "report_type": report_type,
-        "card": card,
-    }
-
-
-# Legacy function - kept for backward compatibility
-def build_adaptive_card(summary: Dict[str, Any],
-                        developer_stats: List[Dict[str, Any]],
-                        tl_name: str,
-                        tl_email: str,
-                        date_label: str,
-                        dashboard_url: str = "http://localhost:9090") -> Dict[str, Any]:
-    """Legacy simplified report - redirects to project-wise format."""
-    # Convert old format to new project-wise format
-    projects_data = []
-
-    for p in summary.get("project_summary", []):
-        project_devs = []
-        for dev in developer_stats:
-            if p.get("project_name") in str(dev.get("projects", [])):
-                project_devs.append({
-                    "name": dev.get("name", dev.get("email", "Unknown")),
-                    "email": dev.get("email", ""),
-                    "branch": dev.get("current_branch", "develop"),
-                    "commits": dev.get("commits", 0),
-                    "issues": dev.get("issues", 0),
-                    "quality_score": dev.get("quality_score", 0),
-                    "productive_hours": dev.get("productive_hours", 0),
-                    "extra_hours": dev.get("extra_hours", 0),
-                })
-
-        projects_data.append({
-            "project_name": p.get("project_name", "Unknown"),
-            "project_id": p.get("project_id", 0),
-            "branches": p.get("branches", []),
-            "developers": project_devs,
-            "total_commits": p.get("total_commits", 0),
-            "total_issues": p.get("deduped_total", 0),
-        })
-
-    return build_project_wise_report(
-        projects_data=projects_data,
-        tl_name=tl_name,
-        tl_email=tl_email,
-        date_label=date_label,
-        report_type="daily",
-        dashboard_url=dashboard_url
-    )
-
-
-def build_flat_payload(
+def build_report_card(
     projects_data: List[Dict[str, Any]],
     tl_name: str,
     tl_email: str,
     date_label: str,
     report_type: str = "daily",
+    dashboard_url: str = "http://localhost:9090",
 ) -> Dict[str, Any]:
-    """Build flat data payload matching Power Automate Parse JSON schema.
+    """Build an Adaptive Card payload that matches the screenshot report format.
 
-    Fields match the schema exactly so Power Automate can read them directly
-    from triggerBody() and build / route the card without null failures.
+    Returns {"target_email": tl_email, "card": {...}}.
+
+    Power Automate Parse JSON schema must be:
+        { "type": "object", "properties": {
+            "target_email": {"type": "string"},
+            "card": {"type": "object"}
+          }
+        }
+    Post-card step: Recipient = body('Parse_JSON')?['target_email']
+                    Card      = string(body('Parse_JSON')?['card'])
     """
-    project_names = ", ".join(p.get("project_name", "") for p in projects_data) or "No projects"
+    body: List[Dict] = []
 
-    # Aggregate totals
-    total_commits = sum(p.get("total_commits", 0) for p in projects_data)
-    blocked_commits = sum(p.get("blocked_commits", 0) for p in projects_data)
-    if total_commits > 0:
-        success_pct = round((total_commits - blocked_commits) / total_commits * 100)
-        success_rate = f"{success_pct}%"
-    else:
-        success_rate = "N/A"
+    # ── aggregate totals ──────────────────────────────────────────────────────
+    total_commits  = sum(p.get("total_commits", 0)  for p in projects_data)
+    total_issues   = sum(p.get("total_issues", 0)   for p in projects_data)
+    blocked        = sum(p.get("blocked_commits", 0) for p in projects_data)
+    scores         = [p.get("quality_score", 0) for p in projects_data if p.get("quality_score")]
+    avg_score      = round(sum(scores) / len(scores), 1) if scores else 0.0
+    score_10       = round(avg_score / 10, 1)
+    success_pct    = round((total_commits - blocked) / total_commits * 100, 1) if total_commits else 0.0
+    letter, label, _ = _grade(avg_score)
 
-    # Average quality score across all projects
-    scores = [p.get("quality_score", 0) for p in projects_data if p.get("quality_score")]
-    avg_score = round(sum(scores) / len(scores), 1) if scores else 0.0
-    if avg_score >= 90:
-        quality_grade = "A"
+    all_devs = [d for p in projects_data for d in p.get("developers", [])]
+    # recompute severity counts from issue_details (tracker leaves counts at 0)
+    def _counts(dev):
+        details = dev.get("issue_details", [])
+        return (
+            sum(1 for i in details if i.get("severity") in ("critical", "error")),
+            sum(1 for i in details if i.get("severity") in ("high", "warning")),
+            sum(1 for i in details if i.get("severity") == "medium"),
+            sum(1 for i in details if i.get("severity") == "low"),
+        )
+
+    all_critical = sum(_counts(d)[0] for d in all_devs)
+    all_high     = sum(_counts(d)[1] for d in all_devs)
+    all_medium   = sum(_counts(d)[2] for d in all_devs)
+    all_low      = sum(_counts(d)[3] for d in all_devs)
+
+    if all_critical > 0:
+        status_text, status_color = "🚨 Critical issues found", "Attention"
     elif avg_score >= 80:
-        quality_grade = "B"
-    elif avg_score >= 70:
-        quality_grade = "C"
-    elif avg_score >= 60:
-        quality_grade = "D"
+        status_text, status_color = "✅ Good standing",        "Good"
     else:
-        quality_grade = "F"
+        status_text, status_color = "⚠️ Needs attention",      "Warning"
 
-    # Flatten all developers across projects
-    all_devs: List[Dict] = []
-    for p in projects_data:
-        all_devs.extend(p.get("developers", []))
+    title_prefix = {
+        "daily":   "📊 Daily",
+        "weekly":  "📊 Weekly",
+        "monthly": "📊 Monthly",
+    }.get(report_type, "📊")
+    project_names = ", ".join(p.get("project_name", "") for p in projects_data) or "—"
 
-    # Developer breakdown — one line per dev
-    dev_lines = []
-    for d in all_devs[:15]:
-        name = d.get("name") or d.get("email") or "Unknown"
-        commits = d.get("commits", 0)
-        issues = d.get("issues", 0)
-        score = d.get("quality_score", 0)
-        dev_lines.append(f"{name}: {commits} commits, {issues} issues, {score}% quality")
-    developer_breakdown = "\n".join(dev_lines) if dev_lines else "No developer data"
+    # ── header ────────────────────────────────────────────────────────────────
+    body.append({
+        "type": "Container",
+        "style": "emphasis",
+        "bleed": True,
+        "items": [
+            {
+                "type": "TextBlock",
+                "text": f"{title_prefix} Code Review Report",
+                "weight": "Bolder",
+                "size": "Large",
+                "wrap": True,
+            },
+            {
+                "type": "FactSet",
+                "facts": [
+                    {"title": "Project:", "value": project_names},
+                    {"title": "Date:",    "value": date_label},
+                    {"title": "Grade:",   "value": f"{letter} ({label})"},
+                    {"title": "Status:",  "value": status_text},
+                ],
+            },
+        ],
+    })
 
-    # Top performers (score >= 70) and needs coaching (score < 60)
-    sorted_devs = sorted(all_devs, key=lambda d: d.get("quality_score", 0) or 0, reverse=True)
-    top_performers = ", ".join(
-        d.get("name") or d.get("email", "?")
-        for d in sorted_devs[:5]
-        if (d.get("quality_score") or 0) >= 70
-    ) or "None"
-    needs_coaching = ", ".join(
-        d.get("name") or d.get("email", "?")
-        for d in sorted_devs[::-1][:5]
-        if (d.get("quality_score") or 0) < 60
-    ) or "None"
+    # ── stats row ─────────────────────────────────────────────────────────────
+    score_color = "Good" if avg_score >= 80 else ("Warning" if avg_score >= 60 else "Attention")
+    body.append({
+        "type": "ColumnSet",
+        "spacing": "Medium",
+        "columns": [
+            {
+                "type": "Column", "width": "1",
+                "items": [
+                    {"type": "TextBlock", "text": "SUCCESS RATE", "size": "Small",
+                     "isSubtle": True, "weight": "Bolder"},
+                    {"type": "TextBlock", "text": f"{success_pct}%",
+                     "size": "ExtraLarge", "weight": "Bolder",
+                     "color": "Good" if success_pct >= 80 else "Warning"},
+                    {"type": "TextBlock", "text": f"↑ {total_commits} commits",
+                     "size": "Small", "isSubtle": True},
+                ],
+            },
+            {
+                "type": "Column", "width": "1",
+                "items": [
+                    {"type": "TextBlock", "text": "BLOCKED", "size": "Small",
+                     "isSubtle": True, "weight": "Bolder"},
+                    {"type": "TextBlock", "text": str(blocked),
+                     "size": "ExtraLarge", "weight": "Bolder",
+                     "color": "Attention" if blocked > 0 else "Good"},
+                    {"type": "TextBlock",
+                     "text": f"↑ {blocked} vs yesterday" if blocked else "None today",
+                     "size": "Small", "isSubtle": True},
+                ],
+            },
+            {
+                "type": "Column", "width": "1",
+                "items": [
+                    {"type": "TextBlock", "text": "AVG SCORE", "size": "Small",
+                     "isSubtle": True, "weight": "Bolder"},
+                    {"type": "TextBlock", "text": f"{score_10}/10",
+                     "size": "ExtraLarge", "weight": "Bolder", "color": score_color},
+                    {"type": "TextBlock", "text": f"{letter} ({label})",
+                     "size": "Small", "isSubtle": True},
+                ],
+            },
+        ],
+    })
 
-    # Aggregate severity across all branches in all projects
-    severity_totals: Dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-    for p in projects_data:
-        for b in p.get("branches", []):
-            for k, v in b.get("severity_breakdown", {}).items():
-                severity_totals[k] = severity_totals.get(k, 0) + int(v or 0)
+    # ── issue trend ───────────────────────────────────────────────────────────
+    body.append({
+        "type": "Container",
+        "style": "default",
+        "spacing": "Medium",
+        "items": [
+            {"type": "TextBlock", "text": "📈 Issue Trend vs Yesterday",
+             "weight": "Bolder", "size": "Medium"},
+            {"type": "TextBlock",
+             "text": f"📋 Total Issues: {total_issues}",
+             "wrap": True, "spacing": "Small"},
+            {"type": "TextBlock",
+             "text": (f"🔴 High: {all_critical + all_high}   "
+                      f"🟡 Medium: {all_medium}   "
+                      f"🟢 Low: {all_low}"),
+             "wrap": True, "spacing": "None"},
+        ],
+    })
 
-    top_violations = (
-        f"Critical: {severity_totals['critical']}, "
-        f"High: {severity_totals['high']}, "
-        f"Medium: {severity_totals['medium']}, "
-        f"Low: {severity_totals['low']}"
-    )
+    # ── per-project developer sections ────────────────────────────────────────
+    for project in projects_data:
+        proj_name  = project.get("project_name", "Project")
+        developers = project.get("developers", [])
+        if not developers:
+            continue
 
-    # Critical issues list — titles from developers' issue_details
-    crit_lines = []
-    for d in all_devs:
-        name = d.get("name") or d.get("email") or "Dev"
-        for issue in d.get("issue_details", []):
-            if issue.get("severity") in ("critical", "error"):
-                title = issue.get("title", "Issue")
-                fname = issue.get("file", "")
-                crit_lines.append(f"{name} — {title} ({fname})")
-                if len(crit_lines) >= 20:
-                    break
-        if len(crit_lines) >= 20:
-            break
-    critical_issues_list = "\n".join(crit_lines) if crit_lines else "No critical issues"
+        body.append({
+            "type": "TextBlock",
+            "text": f"👥 Developer Report — {proj_name}",
+            "weight": "Bolder",
+            "size": "Medium",
+            "spacing": "Large",
+            "separator": True,
+        })
 
-    # Per-developer sections (richer text)
-    sections = []
-    for p in projects_data:
-        sections.append(f"=== {p.get('project_name', 'Project')} ===")
-        for d in p.get("developers", []):
-            name = d.get("name") or d.get("email") or "Dev"
-            commits = d.get("commits", 0)
-            issues = d.get("issues", 0)
-            score = d.get("quality_score", 0)
-            hours = d.get("productive_hours", 0)
-            sections.append(f"{name}: {commits} commits | {issues} issues | {score}% | {hours}h")
-    developer_sections = "\n".join(sections) if sections else "No data"
+        for dev in developers:
+            name    = dev.get("name") or dev.get("email") or "Unknown"
+            commits = dev.get("commits", 0)
+            quality = dev.get("quality_score", 0) or 0
+            score10 = round(quality / 10, 1)
+            details = dev.get("issue_details", [])
 
-    # Action items
-    action_list = []
-    if severity_totals["critical"] > 0:
-        action_list.append(f"Fix {severity_totals['critical']} critical issue(s) immediately")
-    if needs_coaching and needs_coaching != "None":
-        action_list.append(f"Schedule code review coaching for: {needs_coaching}")
-    if avg_score < 70:
-        action_list.append("Team quality below 70% — review coding standards")
-    if not action_list:
-        action_list.append("Maintain current code quality standards")
-    action_items = "\n".join(f"• {a}" for a in action_list)
+            crit_cnt, high_cnt, med_cnt, low_cnt = _counts(dev)
 
-    # Trend labels (simple heuristic — stable unless we have history)
-    commit_trend = "→ Stable"
-    blocked_trend = "→ Stable"
-    improving = "Yes" if avg_score >= 70 else "No"
+            # developer name header
+            body.append({
+                "type": "TextBlock",
+                "text": f"👤 {name}",
+                "weight": "Bolder",
+                "size": "Small",
+                "spacing": "Medium",
+            })
 
-    issues_trend_summary = (
-        f"Grade: {quality_grade} ({avg_score}% avg quality). "
-        f"{severity_totals['critical']} critical, {severity_totals['high']} high issues. "
-        f"{blocked_commits} blocked / {total_commits} total commits."
-    )
+            # list critical + high issues individually
+            top_issues = [i for i in details
+                          if i.get("severity") in ("critical", "error", "high", "warning")][:5]
 
-    return {
-        "project": project_names,
-        "week": date_label,
-        "target_email": tl_email,
-        "total_commits": total_commits,
-        "blocked_commits": blocked_commits,
-        "success_rate": success_rate,
-        "avg_score": avg_score,
-        "quality_grade": quality_grade,
-        "commit_trend": commit_trend,
-        "blocked_trend": blocked_trend,
-        "improving": improving,
-        "top_violations": top_violations,
-        "developer_breakdown": developer_breakdown,
-        "top_performers": top_performers,
-        "needs_coaching": needs_coaching,
-        "action_items": action_items,
-        "critical_issues_list": critical_issues_list,
-        "developer_sections": developer_sections,
-        "issues_trend_summary": issues_trend_summary,
+            if top_issues:
+                for issue in top_issues:
+                    sev = issue.get("severity", "high")
+                    is_crit = sev in ("critical", "error")
+                    emoji   = "🔴" if is_crit else "🟠"
+                    cat     = (issue.get("category") or "").lower()
+                    label_t = "[AI/HIGH]" if cat in ("security", "error_handling",
+                                                      "performance", "maintainability") \
+                              else "[RULES/ERROR]" if is_crit else "[HIGH]"
+                    f_name  = issue.get("file", "")
+                    f_line  = issue.get("line", "")
+                    msg     = issue.get("explanation", "")
+                    rule    = issue.get("title", "")
+                    loc     = f"{f_name}:{f_line}" if f_line else f_name
+
+                    body.append({
+                        "type": "TextBlock",
+                        "text": f"{emoji} {label_t}",
+                        "size": "Small",
+                        "weight": "Bolder",
+                        "color": "Attention" if is_crit else "Warning",
+                        "spacing": "Small",
+                    })
+                    if loc or msg:
+                        body.append({
+                            "type": "TextBlock",
+                            "text": f"📄 {loc} — {msg}" if loc else msg,
+                            "size": "Small",
+                            "isSubtle": True,
+                            "wrap": True,
+                            "spacing": "None",
+                        })
+                    if rule:
+                        body.append({
+                            "type": "TextBlock",
+                            "text": f"Rule: {rule}",
+                            "size": "Small",
+                            "isSubtle": True,
+                            "spacing": "None",
+                        })
+            else:
+                body.append({
+                    "type": "TextBlock",
+                    "text": "✅ No critical issues today",
+                    "size": "Small",
+                    "color": "Good",
+                    "spacing": "Small",
+                })
+
+            # medium / low counts
+            body.append({
+                "type": "TextBlock",
+                "text": f"🟡 Medium: {med_cnt}  •  🟢 Low: {low_cnt}",
+                "size": "Small",
+                "spacing": "Small",
+            })
+
+            # commits / blocked / score
+            blocked_dev = crit_cnt
+            blocked_str = f"Blocked: {blocked_dev} ⚠️" if blocked_dev else "Blocked: 0"
+            body.append({
+                "type": "TextBlock",
+                "text": f"📊 Commits: {commits}  •  {blocked_str}  •  Avg Score: {score10}/10",
+                "size": "Small",
+                "isSubtle": True,
+                "spacing": "Small",
+            })
+
+            body.append({
+                "type": "TextBlock",
+                "text": "─────────────────────────",
+                "isSubtle": True,
+                "size": "Small",
+                "spacing": "Small",
+            })
+
+    # ── footer ────────────────────────────────────────────────────────────────
+    body.append({
+        "type": "TextBlock",
+        "text": f"Generated {date_label}",
+        "size": "Small",
+        "isSubtle": True,
+        "spacing": "Medium",
+    })
+
+    card = {
+        "type": "AdaptiveCard",
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "version": "1.4",
+        "msteams": {"width": "Full"},
+        "body": body,
+        "actions": [{
+            "type": "Action.OpenUrl",
+            "title": "📊 Open Dashboard",
+            "url": dashboard_url,
+        }],
     }
 
+    return {"target_email": tl_email, "card": card}
 
-def post_to_teams(webhook_url: str, payload: Dict[str, Any], timeout: float = 15.0) -> Dict[str, Any]:
-    """POST the payload to a Power Automate webhook.
 
-    The payload should contain: { "recipient": "email", "card": {...}, ... }
-    For Power Automate, we send the full payload including recipient for dynamic routing.
-    For Teams webhook format, we wrap the card in the message envelope.
-
-    Returns `{ ok, status, body }`. Never raises — callers log + move on.
-    """
+def post_to_teams(webhook_url: str, payload: Dict[str, Any],
+                  timeout: float = 15.0) -> Dict[str, Any]:
+    """POST payload to a Power Automate webhook. Never raises."""
     if not webhook_url:
         return {"ok": False, "status": 0, "body": "empty webhook url"}
     if requests is None:
         return {"ok": False, "status": 0, "body": "requests library not installed"}
-
-    # Send the full payload including recipient info
-    # Power Automate will extract recipient from triggerBody()['recipient']
-    # and the card from triggerBody()['card']
     try:
         r = requests.post(webhook_url, json=payload, timeout=timeout,
                           headers={"Content-Type": "application/json"})
-        ok = 200 <= r.status_code < 300
-        # Power Automate typically returns 202 Accepted with an empty body.
+        ok   = 200 <= r.status_code < 300
         body = (r.text or "")[:300]
         return {"ok": ok, "status": r.status_code, "body": body}
     except Exception as e:
         return {"ok": False, "status": 0, "body": f"{type(e).__name__}: {e}"}
 
 
-def send_team_report(webhook_url: str, tl_name: str, tl_email: str,
-                     summary: Dict[str, Any], developer_stats: List[Dict[str, Any]],
-                     date_label: str,
-                     dashboard_url: str = "http://localhost:9090") -> Dict[str, Any]:
-    """Convenience: build + send. Returns the post result dict."""
-    # build_adaptive_card now returns { "recipient": ..., "card": ... }
-    payload = build_adaptive_card(
-        summary=summary,
-        developer_stats=developer_stats,
+# ── kept for any callers that still reference the old names ──────────────────
+def build_flat_payload(*args, **kwargs):
+    return build_report_card(*args, **kwargs)
+
+def build_project_wise_report(*args, **kwargs):
+    return build_report_card(*args, **kwargs)
+
+def build_adaptive_card(*args, **kwargs):
+    return build_report_card(*args, **kwargs)
+
+def send_team_report(webhook_url, tl_name, tl_email, summary, developer_stats,
+                     date_label, dashboard_url="http://localhost:9090"):
+    payload = build_report_card(
+        projects_data=[],
         tl_name=tl_name or tl_email,
         tl_email=tl_email,
         date_label=date_label,
         dashboard_url=dashboard_url,
     )
-    # Send the full payload including recipient for Power Automate dynamic routing
     return post_to_teams(webhook_url, payload)
