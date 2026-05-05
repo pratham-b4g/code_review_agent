@@ -254,6 +254,9 @@ def _prompt_developer_setup(repo_root: Optional[str] = None) -> None:
     # register developer in local store
     success = _register_on_server(name, email, project_key)
 
+    # auto-register in PostgreSQL so admin panel and TL reports work immediately
+    _register_developer_in_postgres(name, email, project_key)
+
     # save global fields (name, email) to ~/.cra/config.json
     _save_cra_config({
         "developer_name": name,
@@ -267,6 +270,38 @@ def _prompt_developer_setup(repo_root: Optional[str] = None) -> None:
 
     if success:
         print("[OK] Developer config saved to ~/.cra/config.json")
+
+
+def _register_developer_in_postgres(name: str, email: str, project_key: str) -> None:
+    """Register developer in PostgreSQL users table and assign to the project.
+    Never raises — a DB failure must never block cra install."""
+    try:
+        from agent.database import DatabaseManager
+        db = DatabaseManager()
+
+        # Create user if not already registered
+        with db.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO users (name, email, role, is_active, created_at)
+                    VALUES (%s, %s, 'developer', TRUE, NOW())
+                    ON CONFLICT (email) DO NOTHING
+                """, (name, email))
+
+                # Assign developer to the project
+                project = db.get_project_by_key(project_key)
+                if project:
+                    cur.execute("""
+                        INSERT INTO project_assignments (project_id, user_email, role_on_project)
+                        VALUES (%s, %s, 'developer')
+                        ON CONFLICT (project_id, user_email) DO NOTHING
+                    """, (project["id"], email))
+                    print(f"[CRA] Registered {email} → project '{project.get('name', project_key)}'")
+                else:
+                    print(f"[CRA] Registered {email} in users table (project key not found in DB yet)")
+            conn.commit()
+    except Exception as e:
+        print(f"[CRA] DB auto-registration skipped: {e}")
 
 
 def _load_global_config() -> dict:
