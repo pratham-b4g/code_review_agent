@@ -1044,6 +1044,7 @@ class DatabaseManager:
                         _j.dumps(critical_issues) if critical_issues else '[]',
                     ))
                     conn.commit()
+                    print(f"[CRA] save_developer_review OK — {developer_email} proj={project_id} blocked={blocked} score={quality_score}")
                     return True
         except Exception as e:
             print(f"[DB Error] save_developer_review: {e}")
