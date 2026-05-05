@@ -1004,6 +1004,32 @@ class DatabaseManager:
             with self.connect() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
+                        CREATE TABLE IF NOT EXISTS developer_reviews (
+                            id                   SERIAL PRIMARY KEY,
+                            developer_email      TEXT NOT NULL,
+                            project_id           INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                            branch               TEXT DEFAULT 'main',
+                            language             TEXT NOT NULL DEFAULT '',
+                            framework            TEXT,
+                            quality_score        DECIMAL(4,1),
+                            high_issues          INTEGER DEFAULT 0,
+                            medium_issues        INTEGER DEFAULT 0,
+                            low_issues           INTEGER DEFAULT 0,
+                            blocked              BOOLEAN DEFAULT FALSE,
+                            files_reviewed       INTEGER DEFAULT 0,
+                            security_issues      INTEGER DEFAULT 0,
+                            quality_issues       INTEGER DEFAULT 0,
+                            style_issues         INTEGER DEFAULT 0,
+                            performance_issues   INTEGER DEFAULT 0,
+                            critical_issues_json JSONB DEFAULT '[]'::jsonb,
+                            created_at           TIMESTAMPTZ DEFAULT NOW()
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_devreviews_email_proj_date
+                        ON developer_reviews (developer_email, project_id, created_at)
+                    """)
+                    cur.execute("""
                         INSERT INTO developer_reviews
                         (developer_email, project_id, branch, language, framework,
                          quality_score, high_issues, medium_issues, low_issues,
