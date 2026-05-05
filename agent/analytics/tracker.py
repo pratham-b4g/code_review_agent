@@ -1119,7 +1119,11 @@ class AnalyticsTracker:
                             'quality': (float(scan['quality_score']) if scan and scan.get('quality_score') is not None else None),
                             'scanned_at': (scan.get('scanned_at').isoformat() if scan and hasattr(scan.get('scanned_at'), 'isoformat')
                                             else (str(scan.get('scanned_at')) if scan else None)),
-                            'violations': (scan.get('violations_json') or []) if scan else [],
+                            # merge admin-rescan violations with hook (blocked-commit) violations
+                            'violations': (
+                                (scan.get('violations_json') or []) +
+                                (scan.get('hook_violations_json') or [])
+                            ) if scan else [],
                         })
                         if attributed > dev_attributed_issues_max:
                             dev_attributed_issues_max = attributed
