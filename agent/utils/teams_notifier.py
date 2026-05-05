@@ -114,13 +114,19 @@ def build_flat_payload(
             details = dev.get("issue_details", [])
             c, h, m, l = _sev(details)
 
-            # delta indicators
-            cd = dev.get("commits_delta", 0)
+            # delta indicators (avoid nested quotes — compatible with Python 3.9+)
+            cd  = dev.get("commits_delta", 0)
             id_ = dev.get("issues_delta", 0)
-            qd = dev.get("quality_delta", 0.0)
-            c_str = f" ({"↑" if cd > 0 else "↓" if cd < 0 else "→"}{abs(cd)} vs prev)" if cd != 0 else ""
-            i_str = f" ({"↑" if id_ > 0 else "↓" if id_ < 0 else "→"}{abs(id_)} vs prev)" if id_ != 0 else ""
-            q_str = f" ({"↑" if qd > 0 else "↓" if qd < 0 else "→"}{abs(qd)} vs prev)" if qd != 0.0 else ""
+            qd  = dev.get("quality_delta", 0.0)
+
+            def _delta(n, unit=""):
+                if n > 0:  return "(+%s%s vs prev)" % (n, unit)
+                if n < 0:  return "(%s%s vs prev)"  % (n, unit)
+                return ""
+
+            c_str = _delta(cd)
+            i_str = _delta(id_)
+            q_str = _delta(qd)
 
             dev_section_lines.append(f"\n👤 {name}")
 
