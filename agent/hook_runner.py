@@ -186,6 +186,11 @@ def run_review(
                     print("\n[BLOCKED] Fix linting errors before the rules check runs.")
                     print("          TIP: Run 'python main.py fix --dir <project>' or add --fix to auto-fix first.")
                     final_code = 1
+                    _save_lint_block_to_server(
+                        language=ctx.language,
+                        framework=ctx.framework or "",
+                        repo_root=root,
+                    )
                     continue
 
         # ── Build engine with language-specific analyzers ────────────────
@@ -379,6 +384,67 @@ def run_review(
         )
 
     return final_code
+
+
+def _save_lint_block_to_server(
+    language: str,
+    framework: str,
+    repo_root: Optional[str] = None,
+) -> None:
+    """Save a lint-blocked push attempt to developer_reviews. Never raises."""
+    try:
+        import subprocess as _sp
+        from agent.git.hook_installer import load_cra_config
+        from agent.database import DatabaseManager
+
+        cra_cfg         = load_cra_config(repo_root=repo_root)
+        project_key     = cra_cfg.get("project_key", "").strip()
+        developer_email = cra_cfg.get("developer_email", "").strip()
+        if not project_key or not developer_email:
+            return
+
+        db      = DatabaseManager()
+        project = db.get_project_by_key(project_key)
+        if not project:
+            return
+
+        project_id = project["id"]
+        branch = "main"
+        if repo_root:
+            br = _sp.run(
+                ["git", "-C", repo_root, "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if br.returncode == 0:
+                branch = br.stdout.strip() or "main"
+
+        db.save_developer_review(
+            developer_email=developer_email,
+            project_id=project_id,
+            branch=branch,
+            language=language,
+            framework=framework,
+            quality_score=0.0,
+            high_issues=1,
+            medium_issues=0,
+            low_issues=0,
+            blocked=True,
+            files_reviewed=0,
+            security_issues=0,
+            quality_issues=1,
+            style_issues=0,
+            performance_issues=0,
+            critical_issues=[{
+                "severity": "error",
+                "message": "Linting failed — fix linter errors before committing",
+                "category": "Code Quality",
+                "source": "lint",
+                "file": "",
+                "line": "",
+            }],
+        )
+    except Exception:
+        pass  # never block a commit
 
 
 def _post_review_to_server(
