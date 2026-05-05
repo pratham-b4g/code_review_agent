@@ -200,25 +200,38 @@ def _run_tick(get_db, dashboard_url: str, catchup: bool = False) -> None:
         print(f"[Scheduler] could not list TLs: {exc}")
         return
 
+    mode = "catch-up" if catchup else "tick"
+    print(f"[Scheduler] {mode}: {len(tls)} TL(s) with active schedules")
+
     for tl in tls:
+        email = tl.get("email", "?")
         hhmm = _parse_hhmm(tl.get("report_time") or "")
         if not hhmm:
+            print(f"[Scheduler]   {email}: no valid report_time, skipping")
             continue
 
         tz_name = tl.get("report_timezone") or "Asia/Kolkata"
         frequency = tl.get("report_frequency") or "daily"
         now_local = _now_in_tz(tz_name)
         last_sent = tl.get("last_report_sent_on")
+        configured = f"{hhmm[0]:02d}:{hhmm[1]:02d}"
+        now_str = now_local.strftime("%H:%M")
+
+        print(f"[Scheduler]   {email}: configured={configured} now={now_str} "
+              f"tz={tz_name} freq={frequency} last_sent={last_sent}")
 
         if _should_fire(now_local, hhmm, last_sent, frequency, catchup=catchup):
             label = "catch-up" if catchup else frequency
-            print(f"[Scheduler] Firing {label} report for {tl.get('email')} "
-                  f"at {now_local.strftime('%H:%M %Z')}")
+            print(f"[Scheduler] >>> Firing {label} report for {email} at {now_str}")
             try:
                 _send_report_for(db, tracker, teams_notifier, email_notifier,
                                  tl, dashboard_url)
             except Exception as exc:
-                print(f"[Scheduler] unexpected error for {tl.get('email')}: {exc}")
+                print(f"[Scheduler] unexpected error for {email}: {exc}")
+        else:
+            already = _already_sent_today(last_sent, frequency, now_local)
+            print(f"[Scheduler]   {email}: skip — "
+                  f"{'already sent today' if already else 'time does not match'}")
 
 
 # ─── main loop ───────────────────────────────────────────────────────────────
@@ -230,11 +243,15 @@ def _seconds_to_next_minute() -> float:
 
 
 def _loop(get_db, dashboard_url: str) -> None:
-    # Startup catch-up: fire any report whose scheduled minute just passed.
-    try:
-        _run_tick(get_db, dashboard_url, catchup=True)
-    except Exception as exc:
-        print(f"[Scheduler] startup catch-up error: {exc}")
+    # Wait for DB to warm up (Neon cold-start can take ~5-10 s) then
+    # run a catch-up pass in case the server restarted near a scheduled time.
+    _stop_event.wait(timeout=12.0)
+    if not _stop_event.is_set():
+        print("[Scheduler] Running startup catch-up check...")
+        try:
+            _run_tick(get_db, dashboard_url, catchup=True)
+        except Exception as exc:
+            print(f"[Scheduler] startup catch-up error: {exc}")
 
     while not _stop_event.is_set():
         # Sleep until the next minute boundary.
