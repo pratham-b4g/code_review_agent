@@ -415,6 +415,8 @@ class DatabaseManager:
             sets.append("email_reports_enabled = %s"); params.append(bool(email_reports_enabled))
         if not sets:
             return True
+        # Reset last_report_sent_on so the newly configured time fires today
+        sets.append("last_report_sent_on = NULL")
         params.append(email)
         try:
             with self.connect() as conn:
