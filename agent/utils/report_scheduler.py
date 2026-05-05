@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 import threading
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 try:
@@ -34,6 +34,24 @@ try:
     import pytz as _pytz
 except Exception:
     _pytz = None  # type: ignore[assignment]
+
+# Fixed UTC offsets for common timezones (no DST — IST never observes DST).
+# Used as last-resort fallback when both zoneinfo and pytz are unavailable.
+_UTC_OFFSETS: Dict[str, timedelta] = {
+    "Asia/Kolkata":      timedelta(hours=5,  minutes=30),
+    "Asia/Colombo":      timedelta(hours=5,  minutes=30),
+    "Asia/Kathmandu":    timedelta(hours=5,  minutes=45),
+    "Asia/Dubai":        timedelta(hours=4),
+    "Asia/Singapore":    timedelta(hours=8),
+    "Asia/Tokyo":        timedelta(hours=9),
+    "UTC":               timedelta(0),
+    "Etc/UTC":           timedelta(0),
+    "Europe/London":     timedelta(0),
+    "Europe/Paris":      timedelta(hours=1),
+    "America/New_York":  timedelta(hours=-5),
+    "America/Chicago":   timedelta(hours=-6),
+    "America/Los_Angeles": timedelta(hours=-8),
+}
 
 
 _scheduler_thread: Optional[threading.Thread] = None
@@ -47,12 +65,16 @@ _CATCHUP_MINUTES = 15
 # ─── helpers ────────────────────────────────────────────────────────────────
 
 def _now_in_tz(tz_name: str) -> datetime:
-    # pytz bundles its own timezone data — works on all platforms including
-    # Windows where the system IANA database is absent.
+    """Return current wall-clock time in tz_name.
+
+    Resolution order:
+    1. pytz  — bundles its own IANA data, works on Windows without system tzdata
+    2. zoneinfo — stdlib (Python 3.9+), needs tzdata package on Windows
+    3. Fixed UTC offset table — stdlib only, always works, no DST
+    """
     if _pytz is not None:
         try:
-            tz = _pytz.timezone(tz_name)
-            return datetime.now(tz)
+            return datetime.now(_pytz.timezone(tz_name))
         except Exception:
             pass
     if ZoneInfo is not None:
@@ -60,8 +82,9 @@ def _now_in_tz(tz_name: str) -> datetime:
             return datetime.now(ZoneInfo(tz_name))
         except Exception:
             pass
-    print(f"[Scheduler] WARNING: could not resolve timezone '{tz_name}', using UTC")
-    return datetime.utcnow()
+    # stdlib fallback — fixed offset, no DST (fine for IST which never has DST)
+    offset = _UTC_OFFSETS.get(tz_name, timedelta(0))
+    return datetime.now(timezone(offset))
 
 
 def _parse_hhmm(value: str) -> Optional[tuple]:
