@@ -38,6 +38,7 @@ setup(
         "groq>=0.9.0",
         "requests>=2.31.0",
         "psycopg2-binary>=2.9.0",
+        "tzdata>=2024.1",
     ],
     extras_require={
         "dev": [
